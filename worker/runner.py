@@ -30,7 +30,7 @@ def run_cmd(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[s
 
 def valid_package_name(value: str) -> bool:
     """Allow ordinary Java-style package identifiers only; reject shell syntax."""
-    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+", value))
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+", value))
 
 
 def main() -> int:
