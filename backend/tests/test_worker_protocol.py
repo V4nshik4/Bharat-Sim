@@ -78,6 +78,8 @@ def test_worker_claim_download_and_result_round_trip(monkeypatch, tmp_path):
     )
     assert submitted.status_code == 200
     assert submitted.json()["evidence_saved"] is True
+    assert submitted.json()["apk_deleted"] is True
+    assert not (main.UPLOAD_DIR / f"{run_id}.apk").exists()
 
     fetched = client.get(f"/api/v1/runs/{run_id}").json()
     assert fetched["status"] == "completed"
