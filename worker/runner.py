@@ -60,7 +60,11 @@ def main() -> int:
         parser.error("APK is not a valid ZIP archive")
 
     started = now()
-    digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+    hasher = hashlib.sha256()
+    with apk.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    digest = hasher.hexdigest()
     report: dict[str, object] = {
         "schema_version": "1.0",
         "started_at": started,
@@ -119,7 +123,7 @@ def main() -> int:
 
         time.sleep(args.duration)
         t = time.monotonic()
-        logs = run_cmd(["adb", "-s", serial, "logcat", "-d", "-v", "threadtime"], timeout=30)
+        logs = run_cmd(["adb", "-s", serial, "logcat", "-d", "-t", "5000", "-v", "threadtime"], timeout=30)
         record("collect_logcat", logs, time.monotonic() - t)
         if logs.returncode != 0:
             raise RuntimeError("logcat collection failed")
