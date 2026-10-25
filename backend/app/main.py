@@ -476,7 +476,7 @@ def worker_submit_result(run_id: str, request: Request, payload: WorkerResultReq
     if len(encoded.encode("utf-8")) > 250_000:
         raise HTTPException(status_code=413, detail="Worker result exceeds the 250 KB inline limit")
     with db() as conn:
-        require_live_lease(conn, run_id, payload.lease_token)
+        lease = require_live_lease(conn, run_id, payload.lease_token)
         if payload.status == "completed" and payload.result.get("status") != "completed":
             raise HTTPException(status_code=422, detail="Completed result must include report status=completed")
         worker = conn.execute("SELECT worker_id FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -489,7 +489,11 @@ def worker_submit_result(run_id: str, request: Request, payload: WorkerResultReq
                 "UPDATE workers SET last_seen=?,status='idle',current_run_id=NULL WHERE id=?",
                 (utcnow(), worker["worker_id"]),
             )
-    return {"id": run_id, "status": payload.status, "evidence_saved": True}
+        apk_path = Path(lease["apk_path"]).resolve() if lease["apk_path"] else None
+    # The bounded report is persisted first; remove the uploaded executable after the terminal result.
+    if apk_path and apk_path.parent == UPLOAD_DIR.resolve():
+        apk_path.unlink(missing_ok=True)
+    return {"id": run_id, "status": payload.status, "evidence_saved": True, "apk_deleted": bool(apk_path)}
 
 
 @app.get("/api/v1/workers")
