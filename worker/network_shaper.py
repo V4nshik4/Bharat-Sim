@@ -82,13 +82,14 @@ def main() -> int:
     expected = args.action != "clear"
     matched = (has_netem == expected)
     print(json.dumps({
-        "status": "verified" if matched else "verification_mismatch",
+        "status": ("qdisc_present" if has_netem else "qdisc_absent") if matched else "verification_mismatch",
         "action": args.action,
         "interface": args.interface,
         "scope": "outbound interface traffic only",
         "requested": {"latency_ms": args.latency_ms, "jitter_ms": args.jitter_ms, "loss_pct": args.loss_pct, "rate_kbit": args.rate_kbit} if args.action == "apply" else None,
         "observed_qdisc": output,
         "netem_present": has_netem,
+        "verification_scope": "Presence check only. Requested latency, jitter, loss and rate values are not parsed back from tc output.",
         "warning": "This does not prove Android traffic traverses this interface; verify routing and a known endpoint separately.",
     }, indent=2))
     return 0 if matched else 2
