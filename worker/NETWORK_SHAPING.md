@@ -21,4 +21,4 @@ sudo -E python worker/network_shaper.py verify --interface veth-bs-run01
 sudo -E python worker/network_shaper.py clear --interface veth-bs-run01
 ```
 
-The report records the requested profile and observed qdisc output. It is a verified interface configuration, not proof that the application experienced the intended network conditions. Before integrating into a run, route emulator traffic through the namespace, probe a known endpoint, record measured latency/throughput/loss and store the result with the run ID.
+The report records the requested profile and observed qdisc output. The current verify action checks only whether a netem qdisc is present or absent; it does not parse the active qdisc to confirm the requested parameter values. This is not proof that the application experienced the intended network conditions. Before integrating into a run, route emulator traffic through the namespace, probe a known endpoint, record measured latency/throughput/loss and store the result with the run ID.
