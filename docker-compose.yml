@@ -1,0 +1,41 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      BHARATSIM_DATA_DIR: /app/backend/data
+      BHARATSIM_MAX_UPLOAD_MB: ${BHARATSIM_MAX_UPLOAD_MB:-150}
+      BHARATSIM_REQUIRE_API_KEY: ${BHARATSIM_REQUIRE_API_KEY:-false}
+      BHARATSIM_API_KEY: ${BHARATSIM_API_KEY:-}
+      BHARATSIM_WORKER_TOKEN: ${BHARATSIM_WORKER_TOKEN:-}
+      BHARATSIM_CORS_ORIGINS: ${BHARATSIM_CORS_ORIGINS:-http://localhost:8080}
+    volumes:
+      - bharatsim-data:/app/backend/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [bharatsim]
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "127.0.0.1:${BHARATSIM_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [bharatsim]
+
+volumes:
+  bharatsim-data:
+
+networks:
+  bharatsim:
+    driver: bridge

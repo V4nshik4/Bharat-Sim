@@ -1,0 +1,54 @@
+name: CI
+on:
+  push:
+    branches: [main, "draft/**"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      - run: pytest -q
+        working-directory: backend
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  worker-guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest worker.tests.test_network_shaper worker.tests.test_runner worker.tests.test_agent
+      - run: python -m py_compile worker/agent.py worker/runner.py worker/network_shaper.py
+
+  container-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API container
+        run: docker build -f backend/Dockerfile -t bharatsim-api:ci .
+      - name: Build frontend container
+        run: docker build -f frontend/Dockerfile -t bharatsim-web:ci .
+      - name: Validate Compose configuration
+        run: docker compose config --quiet

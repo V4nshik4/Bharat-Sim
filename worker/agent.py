@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Polling worker for BharatSim's authenticated lease API.
+
+Run only inside a disposable, restricted Android worker with ADB targeting a
+throwaway emulator/device. This agent uses Python's standard library only.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNNER = ROOT / "worker" / "runner.py"
+MAX_RESPONSE_BYTES = 300_000
+
+
+class WorkerError(RuntimeError):
+    pass
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward machine credentials to a redirect target."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_SAFE_OPENER = urllib.request.build_opener(NoRedirectHandler())
+
+
+def safe_urlopen(request: urllib.request.Request, timeout: int):
+    return _SAFE_OPENER.open(request, timeout=timeout)
+
+
+def request_json(base_url: str, token: str, path: str, payload: dict[str, Any] | None = None, timeout: int = 30) -> dict[str, Any]:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/")),
+        data=body,
+        headers={"X-BharatSim-Worker-Token": token, "Content-Type": "application/json", "Accept": "application/json"},
+        method="GET" if payload is None else "POST",
+    )
+    with safe_urlopen(req, timeout=timeout) as response:
+        data = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(data) > MAX_RESPONSE_BYTES:
+        raise WorkerError("API response exceeds the configured size limit")
+    value = json.loads(data.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise WorkerError("API returned a non-object JSON response")
+    return value
+
+
+def download_apk(base_url: str, token: str, job: dict[str, Any], target: Path) -> None:
+    path = str(job["apk_url"])
+    req = urllib.request.Request(
+        urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/")),
+        headers={
+            "X-BharatSim-Worker-Token": token,
+            "X-BharatSim-Lease-Token": str(job["lease_token"]),
+            "Accept": "application/vnd.android.package-archive",
+        },
+    )
+    total = 0
+    digest = hashlib.sha256()
+    with safe_urlopen(req, timeout=60) as response, target.open("wb") as output:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 150 * 1024 * 1024:
+                raise WorkerError("Downloaded APK exceeds the 150 MiB worker limit")
+            digest.update(chunk)
+            output.write(chunk)
+    if total == 0:
+        raise WorkerError("API returned an empty APK")
+    expected = str(job.get("apk_sha256") or "")
+    if len(expected) != 64 or digest.hexdigest() != expected:
+        target.unlink(missing_ok=True)
+        raise WorkerError("Downloaded APK SHA-256 does not match the queued run")
+
+
+def run_job(base_url: str, token: str, serial: str, job: dict[str, Any], duration: int) -> None:
+    run_id = str(job["id"])
+    lease_token = str(job["lease_token"])
+    stop_heartbeat = threading.Event()
+
+    def heartbeat() -> None:
+        while not stop_heartbeat.wait(45):
+            try:
+                request_json(base_url, token, str(job["heartbeat_url"]), {"lease_token": lease_token}, timeout=15)
+            except Exception as exc:
+                print(f"heartbeat warning for {run_id}: {exc}", file=sys.stderr, flush=True)
+
+    heartbeat_thread = threading.Thread(target=heartbeat, name="lease-heartbeat", daemon=True)
+    heartbeat_thread.start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="bharatsim-") as temp:
+            work = Path(temp)
+            apk = work / "input.apk"
+            artifact_dir = work / "artifacts"
+            download_apk(base_url, token, job, apk)
+            env = os.environ.copy()
+            env.update({
+                "BHARATSIM_ENABLE_LOCAL_APK_EXECUTION": "true",
+                "ANDROID_SERIAL": serial,
+            })
+            completed = subprocess.run(
+                [sys.executable, str(RUNNER), str(apk), "--duration", str(duration), "--out", str(artifact_dir)],
+                env=env, capture_output=True, text=True, timeout=360, check=False,
+            )
+            reports = list(artifact_dir.glob("*.report.json"))
+            if reports:
+                report = json.loads(reports[0].read_text(encoding="utf-8"))
+            else:
+                report = {"status": "failed", "error": "Runner did not produce a report", "runner_return_code": completed.returncode}
+            report.pop("device_serial", None)
+            report.pop("logcat_artifact", None)
+            # Keep the report well below the API's 250 KB JSON limit even with non-ASCII log text.
+            for step in report.get("steps", []):
+                if isinstance(step, dict):
+                    for field in ("stdout_tail", "stderr_tail"):
+                        if field in step:
+                            step[field] = str(step[field])[-800:]
+            log_files = list(artifact_dir.glob("*.logcat.txt"))
+            if log_files:
+                # Full artifact storage is a separate production concern.
+                report["logcat_tail"] = log_files[0].read_text(encoding="utf-8", errors="replace")[-30_000:]
+            report["runner_return_code"] = completed.returncode
+            if completed.stderr:
+                report["runner_stderr_tail"] = completed.stderr[-4_000:]
+            final_status = "completed" if report.get("status") == "completed" else "failed"
+            error = None if final_status == "completed" else str(report.get("error") or "Android smoke runner failed")[:2000]
+            request_json(base_url, token, str(job["result_url"]), {
+                "lease_token": lease_token, "status": final_status, "result": report, "error": error,
+            }, timeout=30)
+            print(json.dumps({"run_id": run_id, "status": final_status, "apk_sha256": job.get("apk_sha256")}), flush=True)
+    except Exception as exc:
+        # A failed report submission is intentionally not disguised as a successful run.
+        try:
+            request_json(base_url, token, str(job["result_url"]), {
+                "lease_token": lease_token, "status": "failed",
+                "result": {"status": "failed", "error": str(exc)[:2000]},
+                "error": str(exc)[:2000],
+            }, timeout=20)
+        except Exception as submit_exc:
+            print(f"could not submit failure for {run_id}: {submit_exc}", file=sys.stderr, flush=True)
+        print(f"run {run_id} failed: {exc}", file=sys.stderr, flush=True)
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=2)
+
+
+def main() -> int:
+    base_url = os.getenv("BHARATSIM_API_URL", "").strip()
+    token = os.getenv("BHARATSIM_WORKER_TOKEN", "").strip()
+    serial = os.getenv("ANDROID_SERIAL", "").strip()
+    worker_id = os.getenv("BHARATSIM_WORKER_ID", socket.gethostname()).strip()
+    poll_seconds = int(os.getenv("BHARATSIM_POLL_SECONDS", "5"))
+    duration = int(os.getenv("BHARATSIM_SMOKE_DURATION_SECONDS", "20"))
+    if not base_url.startswith("https://") and not (base_url.startswith("http://") and os.getenv("BHARATSIM_ALLOW_INSECURE_HTTP") == "true"):
+        print("BHARATSIM_API_URL must use HTTPS (HTTP is allowed only with BHARATSIM_ALLOW_INSECURE_HTTP=true for local testing)", file=sys.stderr)
+        return 2
+    if len(token) < 32:
+        print("BHARATSIM_WORKER_TOKEN must be a random secret of at least 32 characters", file=sys.stderr)
+        return 2
+    if not serial:
+        print("ANDROID_SERIAL must explicitly identify a disposable emulator/device", file=sys.stderr)
+        return 2
+    if not 1 <= poll_seconds <= 60 or not 1 <= duration <= 120:
+        print("poll interval must be 1-60s and smoke duration 1-120s", file=sys.stderr)
+        return 2
+    if os.getenv("BHARATSIM_ENABLE_LOCAL_APK_EXECUTION") != "true":
+        print("Set BHARATSIM_ENABLE_LOCAL_APK_EXECUTION=true only after isolating the worker", file=sys.stderr)
+        return 2
+    if not RUNNER.is_file():
+        print(f"Runner not found: {RUNNER}", file=sys.stderr)
+        return 2
+
+    print(f"BharatSim worker {worker_id} starting; target device is explicitly configured.", flush=True)
+    while True:
+        try:
+            response = request_json(base_url, token, "/internal/worker/claim", {"worker_id": worker_id}, timeout=20)
+            job = response.get("job")
+            if not job:
+                time.sleep(poll_seconds)
+                continue
+            print(f"claimed run {job.get('id')} attempt {job.get('attempt')}", flush=True)
+            run_job(base_url, token, serial, job, duration)
+        except KeyboardInterrupt:
+            return 0
+        except urllib.error.HTTPError as exc:
+            print(f"worker API HTTP error {exc.code}: {exc.reason}", file=sys.stderr, flush=True)
+            time.sleep(min(30, poll_seconds * 2))
+        except Exception as exc:
+            print(f"worker loop error: {exc}", file=sys.stderr, flush=True)
+            time.sleep(min(30, poll_seconds * 2))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
