@@ -13,3 +13,5 @@
 .run-detail .empty-state{padding:28px 10px}
 .run-detail .table-sub{display:block;max-width:220px;overflow-wrap:anywhere}
 @media(max-width:720px){.run-detail{padding:13px}.report-json{font-size:10px;max-height:420px}.table-wrap table{min-width:700px}}
+
+.profile-caveat{font-size:10px!important;line-height:1.5;color:#e2c28c!important;border-left:2px solid #a8844b;padding-left:10px;margin:8px 0 12px!important}
