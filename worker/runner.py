@@ -113,6 +113,10 @@ def main() -> int:
         if badging.returncode != 0 or not match:
             raise RuntimeError("could not read package name from APK using aapt")
         package_name = match.group(1)
+        # The package name is later passed to an adb shell command. Validate it
+        # strictly to prevent APK-controlled shell metacharacters reaching the device.
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+", package_name):
+            raise RuntimeError("APK contains an invalid Android package name")
         report["package_name"] = package_name
 
         t = time.monotonic()
@@ -153,6 +157,17 @@ def main() -> int:
             report["status"] = "completed"
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
         report["error"] = str(exc)
+    # Always attempt to remove the test package from a reusable disposable
+    # emulator. This is cleanup, not a substitute for reverting a VM snapshot.
+    if report.get("package_name"):
+        t = time.monotonic()
+        uninstall = run_cmd(["adb", "-s", serial, "uninstall", str(report["package_name"])], timeout=30)
+        record("cleanup_uninstall", uninstall, time.monotonic() - t)
+        if uninstall.returncode != 0 and "Unknown package" not in (uninstall.stdout + uninstall.stderr):
+            report["cleanup_warning"] = "Could not uninstall the test package; reset or discard this emulator before another job."
+            if report["status"] == "completed":
+                report["status"] = "failed"
+                report["error"] = report["cleanup_warning"]
     report["finished_at"] = now()
     args.out.mkdir(parents=True, exist_ok=True)
     report_path = args.out / (digest[:12] + ".report.json")
