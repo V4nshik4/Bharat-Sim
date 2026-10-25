@@ -40,6 +40,7 @@ Lease tokens are per-run capabilities and must be kept secret. Stale/expired lea
 ## Security and limits
 
 - APK uploads are size-limited and validated as APK-like ZIP archives with bounded metadata. This is not malware scanning.
+- Uploaded APKs are deleted after terminal worker results when filesystem cleanup succeeds. Abandoned uploads expire after 24 hours during startup, run creation, or worker claim requests; this is not a background scheduler.
 - Worker reports are limited to 250 KB inline; production deployments should use private artifact storage for larger evidence.
 - The worker does not currently apply network shaping, resource pressure, or app-specific UI journeys.
 - Do not expose public APK execution until user identity/ownership, isolated worker execution, quotas, egress restrictions, and artifact retention controls are implemented and reviewed.
