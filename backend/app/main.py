@@ -466,7 +466,7 @@ def worker_claim(request: Request, payload: WorkerClaimRequest):
 
 def require_live_lease(conn: sqlite3.Connection, run_id: str, lease_token: str) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT id,status,lease_token,lease_until,apk_path FROM runs WHERE id=?", (run_id,)
+        "SELECT id,status,lease_token,lease_until,apk_path,apk_sha256 FROM runs WHERE id=?", (run_id,)
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Run not found")
