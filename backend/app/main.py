@@ -491,9 +491,14 @@ def worker_submit_result(run_id: str, request: Request, payload: WorkerResultReq
             )
         apk_path = Path(lease["apk_path"]).resolve() if lease["apk_path"] else None
     # The bounded report is persisted first; remove the uploaded executable after the terminal result.
+    apk_deleted = False
     if apk_path and apk_path.parent == UPLOAD_DIR.resolve():
-        apk_path.unlink(missing_ok=True)
-    return {"id": run_id, "status": payload.status, "evidence_saved": True, "apk_deleted": bool(apk_path)}
+        try:
+            apk_path.unlink(missing_ok=True)
+            apk_deleted = not apk_path.exists()
+        except OSError:
+            apk_deleted = False
+    return {"id": run_id, "status": payload.status, "evidence_saved": True, "apk_deleted": apk_deleted}
 
 
 @app.get("/api/v1/workers")
