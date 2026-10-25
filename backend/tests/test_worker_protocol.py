@@ -40,10 +40,11 @@ def test_worker_claim_download_and_result_round_trip(monkeypatch, tmp_path):
     token = os.environ["BHARATSIM_WORKER_TOKEN"]
     headers = {"X-BharatSim-Worker-Token": token}
 
+    apk_content = apk_bytes()
     created = client.post(
         "/api/v1/runs",
         data={"persona_id": "baseline"},
-        files={"apk": ("tiny-test.apk", apk_bytes(), "application/vnd.android.package-archive")},
+        files={"apk": ("tiny-test.apk", apk_content, "application/vnd.android.package-archive")},
     )
     assert created.status_code == 200
     run = created.json()
@@ -62,7 +63,7 @@ def test_worker_claim_download_and_result_round_trip(monkeypatch, tmp_path):
         headers=headers,
     )
     assert downloaded.status_code == 200
-    assert downloaded.content == apk_bytes()
+    assert downloaded.content == apk_content
 
     report = {
         "status": "completed",
