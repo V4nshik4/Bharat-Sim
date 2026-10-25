@@ -31,3 +31,12 @@ jobs:
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
+
+  worker-guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest worker.tests.test_network_shaper
