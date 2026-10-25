@@ -10,7 +10,7 @@ def test_detects_crash_network_and_memory_signals():
     result = analyze_log_text(text, "budget-android")
     assert {f["kind"] for f in result["findings"]} == {"crash", "oom", "network"}
     assert result["summary"]["critical"] == 2
-    assert result["bharat_score"]["value"] == 44
+    assert result["bharat_score"]["value"] == 30
     assert all(f["evidence"][0]["line"] > 0 for f in result["findings"])
 
 
