@@ -2,33 +2,37 @@
 
 ## Current implementation
 
-The repository currently provides a FastAPI service, a React/Vite dashboard, deterministic persona profiles, a risk-ordering heuristic, SQLite persistence, APK upload metadata and a deterministic log marker analyzer.
+The repository provides a FastAPI service, a React/Vite dashboard, deterministic persona profiles, a risk-ordering heuristic, SQLite persistence, bounded APK upload validation, a log marker analyzer, and an authenticated worker-dispatch protocol.
 
-### Data flow
+## Data flow
 
-1. The browser fetches personas and submits an APK with a persona selection.
-2. The API validates the extension, checks the ZIP signature/archive, enforces a size limit, stores the file under a generated identifier and calculates SHA-256.
-3. The run is persisted as `awaiting_worker` unless a worker URL is configured. This version does not yet dispatch to that worker.
-4. Developers can paste logcat text. The analyzer detects known markers, retains line references, fingerprints signals and returns cautious next steps.
-5. The score is a disclosed heuristic over detected signals only; it is not a population estimate.
+1. The browser fetches personas and submits an APK with a selected persona.
+2. The API validates the extension and APK-like ZIP metadata, enforces a size limit, stores the file under a generated run identifier, and calculates SHA-256.
+3. If BHARATSIM_WORKER_TOKEN is configured, the run enters queued; otherwise it remains awaiting_worker.
+4. The worker agent claims a queued run and receives a short-lived lease token. The token is required to download the run's APK, renew the lease, and submit a result.
+5. The worker runs the bounded ADB smoke runner against its explicitly configured disposable Android device. It submits the structured report and bounded logcat evidence; the API rejects stale leases and stores the accepted result.
+6. After a terminal result is saved, the API attempts to delete the uploaded APK. The report remains attached to the run record.
+7. Developers can paste logcat text. The analyzer detects known markers, retains line references, fingerprints signals, and returns cautious next steps.
+8. The score is a disclosed heuristic over detected signals only; it is not a population estimate.
 
-## Execution worker (not implemented yet)
+## Worker and trust boundaries
 
-The next architecture milestone is a separately deployed worker that owns Android SDK/ADB and disposable emulator instances. The worker should accept signed/authorized jobs, verify the APK hash, install and launch it, execute scripted flows, collect logcat/ANR/thread and resource metrics, and report structured artifacts. It must not execute untrusted APKs in the API process.
+The worker agent and runner are separate from the API process, but they do not themselves create a sandbox. They must be deployed on a disposable, restricted host/VM with no production secrets, strict resource limits, restricted outbound networking, and clean-up policies. Do not expose public APK execution until the host-level isolation and multi-user authorization design have been reviewed.
 
-Worker requirements:
-- ephemeral emulator or physical device with clean snapshot per run;
-- strict CPU, memory, disk, wall-clock and log-size limits;
-- restricted network egress and no access to developer credentials;
-- explicit applied/unsupported status for each network and resource constraint;
-- immutable run IDs, APK hashes, timestamps, persona version and artifacts;
-- cleanup after success, timeout or failure;
-- a worker integration contract and authentication before enabling dispatch.
+Current worker protocol controls include:
+- authenticated claim requests and per-run lease tokens;
+- five-minute lease with heartbeat renewal and up to three claims after abandoned leases;
+- APK download authorization tied to the active lease;
+- stale/duplicate result rejection and a 250 KB inline result limit;
+- worker heartbeat display in the dashboard;
+- APK deletion after a terminal result, when filesystem deletion succeeds.
+
+Production gaps remain: no multi-user identity or run ownership, durable object storage, PostgreSQL/durable distributed queue, per-job disposable VM snapshot/revert, complete cancellation, quotas, or artifact retention policy.
 
 ## Network shaping
 
-Linux `tc/netem` can emulate latency, jitter, loss and rate limits on a controlled host network, but does not automatically shape traffic inside every Android Emulator topology. Validate the path with a known test endpoint and record measured/applied conditions. Do not display a profile as applied merely because the UI selected it.
+Linux tc/netem can emulate latency, jitter, loss, and rate limits on a controlled host network, but does not automatically shape traffic inside every Android Emulator topology. The guarded network shaper is still a standalone prototype and is not invoked by the worker agent. Validate the path with a known test endpoint and record measured/applied conditions. Do not display a profile as applied merely because the UI selected it.
 
 ## Security
 
-APK files and logs are untrusted inputs. The current API checks archive shape and size but does not perform malware analysis and is not a secure execution sandbox. Before public deployment, add authentication, quotas, retention/cleanup, malware handling, private object storage, upload scanning and isolated worker execution. Never send logs to a hosted AI service without explicit consent.
+APK files and logs are untrusted inputs. The API checks archive shape and size but does not perform malware analysis and is not a secure execution sandbox. Before public deployment, add user authentication, per-run authorization, quotas, retention/cleanup, private object storage, restricted egress, and isolated worker execution. Never send logs to a hosted AI service without explicit consent.
