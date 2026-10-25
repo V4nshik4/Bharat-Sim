@@ -48,10 +48,14 @@ def request_json(base_url: str, token: str, path: str, payload: dict[str, Any] |
 
 
 def download_apk(base_url: str, token: str, job: dict[str, Any], target: Path) -> None:
-    path = str(job["apk_url"]) + "?lease_token=" + urllib.parse.quote(str(job["lease_token"]))
+    path = str(job["apk_url"])
     req = urllib.request.Request(
         urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/")),
-        headers={"X-BharatSim-Worker-Token": token, "Accept": "application/vnd.android.package-archive"},
+        headers={
+            "X-BharatSim-Worker-Token": token,
+            "X-BharatSim-Lease-Token": str(job["lease_token"]),
+            "Accept": "application/vnd.android.package-archive",
+        },
     )
     total = 0
     with urllib.request.urlopen(req, timeout=60) as response, target.open("wb") as output:
