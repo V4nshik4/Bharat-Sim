@@ -193,11 +193,11 @@ def health_live():
 
 @app.get("/health/ready")
 def health_ready():
-    worker_configured = bool(os.getenv("BHARATSIM_WORKER_URL"))
+    worker_configured = False  # Worker dispatch/result callbacks are not implemented in this draft.
     return {
         "status": "ready" if DB_PATH.exists() else "not_ready",
         "database": "available" if DB_PATH.exists() else "missing",
-        "apk_execution_worker": "configured" if worker_configured else "not_configured",
+        "apk_execution_worker": "not_integrated",
         "execution_capability": "external-worker-required",
         "timestamp": utcnow(),
     }
@@ -273,7 +273,7 @@ async def create_run(
             target.unlink(missing_ok=True)
             raise
         apk_name, apk_hash, apk_path = safe_name, digest.hexdigest(), str(target)
-    status = "queued" if os.getenv("BHARATSIM_WORKER_URL") else "awaiting_worker"
+    status = "awaiting_worker"
     with db() as conn:
         conn.execute(
             "INSERT INTO runs(id,created_at,status,apk_name,apk_sha256,apk_path,persona_id,result_json,error) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -283,7 +283,7 @@ async def create_run(
         "id": run_id, "created_at": utcnow(), "status": status,
         "apk": {"name": apk_name, "sha256": apk_hash, "uploaded": bool(apk_name)},
         "persona": PERSONAS[persona_id],
-        "message": "Upload recorded. No APK execution is claimed: configure and connect a sandboxed Android worker to execute this run." if status == "awaiting_worker" else "Queued for the configured worker; confirm worker-side status before treating it as executed.",
+        "message": "Upload recorded. This draft has no worker dispatch integration; no APK execution is claimed." ,
     }
 
 @app.get("/api/v1/runs")
@@ -326,11 +326,11 @@ def capabilities():
     return {
         "apk_upload": True, "log_analysis": True, "risk_planner": True,
         "failure_fingerprinting": True, "bharat_score": True,
-        "android_execution": worker,
+        "android_execution": False,
         "network_shaping": False,
         "sarvam_translation": bool(os.getenv("SARVAM_API_KEY")),
         "notes": [
-            "Android execution is only enabled when a real worker is configured and integrated.",
+            "Android execution is not integrated in this draft, even if a worker URL environment variable is present.",
             "Network shaping is not claimed by this API-only build.",
             "Sarvam integration is not yet wired; the flag only reports whether credentials are configured.",
         ],
