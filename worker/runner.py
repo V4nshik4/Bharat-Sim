@@ -146,7 +146,11 @@ def main() -> int:
         report["logcat_artifact"] = str(log_path)
         report["logcat_bytes"] = len(logs.stdout.encode("utf-8", errors="replace"))
         report["fatal_exception_marker"] = bool(re.search(r"FATAL EXCEPTION|Fatal signal|SIGSEGV", logs.stdout, re.I))
-        report["status"] = "completed"
+        if report["fatal_exception_marker"]:
+            report["status"] = "failed"
+            report["error"] = "Fatal crash marker observed during the smoke-test observation window"
+        else:
+            report["status"] = "completed"
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
         report["error"] = str(exc)
     report["finished_at"] = now()
