@@ -40,3 +40,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m unittest worker.tests.test_network_shaper
+      - run: python -m py_compile worker/agent.py worker/runner.py worker/network_shaper.py
