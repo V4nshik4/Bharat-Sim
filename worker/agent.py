@@ -118,7 +118,7 @@ def run_job(base_url: str, token: str, serial: str, job: dict[str, Any], duratio
             })
             completed = subprocess.run(
                 [sys.executable, str(RUNNER), str(apk), "--duration", str(duration), "--out", str(artifact_dir)],
-                env=env, capture_output=True, text=True, timeout=240, check=False,
+                env=env, capture_output=True, text=True, timeout=360, check=False,
             )
             reports = list(artifact_dir.glob("*.report.json"))
             if reports:
