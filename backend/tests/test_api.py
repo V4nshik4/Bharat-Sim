@@ -40,3 +40,12 @@ def test_log_analysis_persists_report():
 def test_unknown_persona_rejected():
     response = client.post("/api/v1/analyze/logs", json={"text": "hello", "persona_id": "missing"})
     assert response.status_code == 422
+
+
+def test_readiness_returns_503_when_database_is_unavailable(monkeypatch, tmp_path):
+    from app import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "missing" / "unavailable.sqlite3")
+    response = client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
