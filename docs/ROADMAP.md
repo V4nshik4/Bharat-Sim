@@ -12,6 +12,7 @@
 - [x] Authenticated worker claim protocol, short-lived leases, heartbeat extension, authorized APK download, result callbacks, stale-result rejection, and bounded inline results.
 - [x] Polling worker agent using the Python standard library and a guarded ADB smoke runner.
 - [x] Backend API/security/worker protocol tests, frontend production build CI, and worker guard/compile checks.
+- [x] Local Docker Compose stack for API + dashboard, loopback-only port binding, persistent data volume, health checks, and container-build CI.
 - [x] Security model, worker setup, open-source references, and explicit feature/limitation documentation.
 
 ## Remaining before calling execution fully functional
