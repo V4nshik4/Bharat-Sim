@@ -130,3 +130,27 @@ def test_abandoned_apk_upload_expires_after_retention_window(monkeypatch, tmp_pa
     assert fetched["status"] == "failed"
     assert fetched["error"] == "APK upload expired before execution"
     assert not apk_path.exists()
+
+def test_worker_cannot_submit_evidence_for_a_different_apk(monkeypatch, tmp_path):
+    client = prepare_isolated_db(monkeypatch, tmp_path)
+    headers = {"X-BharatSim-Worker-Token": os.environ["BHARATSIM_WORKER_TOKEN"]}
+    created = client.post(
+        "/api/v1/runs",
+        data={"persona_id": "baseline"},
+        files={"apk": ("hash-check.apk", apk_bytes(), "application/vnd.android.package-archive")},
+    )
+    run = created.json()
+    job = client.post(
+        "/internal/worker/claim", headers=headers, json={"worker_id": "hash-check-worker"}
+    ).json()["job"]
+    response = client.post(
+        f"/internal/worker/runs/{run['id']}/result",
+        headers=headers,
+        json={
+            "lease_token": job["lease_token"],
+            "status": "completed",
+            "result": {"status": "completed", "apk_sha256": "0" * 64},
+        },
+    )
+    assert response.status_code == 422
+    assert "SHA-256" in response.json()["detail"]
