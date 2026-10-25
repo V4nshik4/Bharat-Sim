@@ -506,7 +506,7 @@ def worker_status():
             online = False
         items.append({"id": row["id"], "last_seen": row["last_seen"], "status": row["status"] if online else "offline",
                       "online": online, "current_run_id": row["current_run_id"] if online else None})
-    return {"items": items, "online_count": sum(1 for item in items if item["online"]})
+    return {"items": items, "online_count": sum(1 for item in items if item["online"])}
 
 
 @app.get("/api/v1/runs/{run_id}")
