@@ -111,3 +111,22 @@ def test_worker_cannot_claim_success_without_completed_report(monkeypatch, tmp_p
         json={"lease_token": job["lease_token"], "status": "completed", "result": {"status": "failed"}},
     )
     assert response.status_code == 422
+
+def test_abandoned_apk_upload_expires_after_retention_window(monkeypatch, tmp_path):
+    client = prepare_isolated_db(monkeypatch, tmp_path)
+    token = os.environ["BHARATSIM_WORKER_TOKEN"]
+    created = client.post(
+        "/api/v1/runs",
+        data={"persona_id": "baseline"},
+        files={"apk": ("expired.apk", apk_bytes(), "application/vnd.android.package-archive")},
+    )
+    run_id = created.json()["id"]
+    apk_path = main.UPLOAD_DIR / f"{run_id}.apk"
+    assert apk_path.exists()
+    with main.db() as conn:
+        conn.execute("UPDATE runs SET created_at=? WHERE id=?", ("2000-01-01T00:00:00+00:00", run_id))
+    main.cleanup_expired_uploads()
+    fetched = client.get(f"/api/v1/runs/{run_id}").json()
+    assert fetched["status"] == "failed"
+    assert fetched["error"] == "APK upload expired before execution"
+    assert not apk_path.exists()
