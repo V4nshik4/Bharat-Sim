@@ -41,3 +41,14 @@ jobs:
           python-version: "3.12"
       - run: python -m unittest worker.tests.test_network_shaper
       - run: python -m py_compile worker/agent.py worker/runner.py worker/network_shaper.py
+
+  container-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API container
+        run: docker build -f backend/Dockerfile -t bharatsim-api:ci .
+      - name: Build frontend container
+        run: docker build -f frontend/Dockerfile -t bharatsim-web:ci .
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
