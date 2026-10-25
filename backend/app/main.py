@@ -542,12 +542,12 @@ def capabilities():
     return {
         "apk_upload": True, "log_analysis": True, "risk_planner": True,
         "failure_fingerprinting": True, "bharat_score": True,
-        "android_execution": worker,
+        "android_execution": False,
         "worker_dispatch": worker,
         "network_shaping": False,
         "sarvam_translation": False,
         "notes": [
-            "Worker dispatch is enabled only when BHARATSIM_WORKER_TOKEN is configured; a live worker and emulator are still required for execution.",
+            "Worker dispatch is configured only when BHARATSIM_WORKER_TOKEN is set; android_execution remains false here because this API cannot prove a live emulator has executed an APK. Check /api/v1/workers for recent worker heartbeats.",
             "Network shaping is not claimed by the API; configured profiles must be verified on the actual emulator traffic path.",
             "Sarvam translation is not wired into this application.",
             "Worker result payloads are bounded and protected by lease tokens; inline artifact payloads are limited to 250 KB.",
