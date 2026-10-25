@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -441,7 +441,7 @@ def require_live_lease(conn: sqlite3.Connection, run_id: str, lease_token: str) 
 
 
 @app.get("/internal/worker/runs/{run_id}/apk")
-def worker_download_apk(run_id: str, request: Request, lease_token: str):
+def worker_download_apk(run_id: str, request: Request, lease_token: str = Header(..., alias="X-BharatSim-Lease-Token")):
     require_worker_token(request)
     with db() as conn:
         row = require_live_lease(conn, run_id, lease_token)
