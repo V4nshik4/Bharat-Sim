@@ -13,7 +13,8 @@
 - Optional polling worker that runs an explicitly enabled ADB smoke test against a configured disposable Android device.
 - Deterministic logcat signal analysis, failure fingerprints, evidence-linked findings, and a transparent heuristic BharatScore.
 - React/Vite dashboard with run history, worker heartbeat status, log analysis, and report inspection.
-- CI for backend tests, frontend production build, and worker safety guards.
+- Docker Compose setup for local API/dashboard deployment, with a loopback-only web binding by default.
+- CI for backend tests, frontend production build, worker safety guards, and container builds.
 
 ## What is not complete
 
@@ -54,6 +55,10 @@ Open http://localhost:8000/docs and http://localhost:8000/health/ready.
 
 The frontend uses same-origin API requests by default. Set VITE_API_BASE_URL=http://localhost:8000 in frontend/.env.local only if needed. Never put private keys in VITE_* variables.
 
+### Docker Compose
+
+See docs/DEPLOYMENT.md. The local stack runs with `docker compose up --build -d` and serves the dashboard at `http://127.0.0.1:8080`. It does not provision an Android emulator and is not safe for public multi-user APK execution.
+
 ### Worker
 
 See worker/README.md. Configure BHARATSIM_WORKER_TOKEN on the API and worker, provide an HTTPS BHARATSIM_API_URL, configure an explicit disposable ANDROID_SERIAL, and opt in with BHARATSIM_ENABLE_LOCAL_APK_EXECUTION=true. Do not run unknown APKs on a personal device or an unisolated host.
@@ -67,8 +72,12 @@ See worker/README.md. Configure BHARATSIM_WORKER_TOKEN on the API and worker, pr
     python -m unittest worker.tests.test_network_shaper
     python -m py_compile worker/agent.py worker/runner.py
     cd frontend
-    npm ci
+    npm install
     npm run build
+    cd ..
+    docker compose config --quiet
+    docker build -f backend/Dockerfile -t bharatsim-api:local .
+    docker build -f frontend/Dockerfile -t bharatsim-web:local .
 
 ## API and execution truth
 
@@ -81,7 +90,7 @@ See worker/README.md. Configure BHARATSIM_WORKER_TOKEN on the API and worker, pr
 
 ## Security
 
-Treat every uploaded APK as untrusted code. APK archive checks are not malware scanning or sandboxing. Keep execution on an isolated disposable worker with restricted egress, no production secrets, resource/time limits, and cleanup. The shared API/worker tokens are machine-to-machine credentials, not multi-user authentication. Do not expose public APK execution until identity/ownership, quotas, storage retention, and host isolation have been reviewed. See the security and worker documentation.
+Treat every uploaded APK as untrusted code. APK archive checks are not malware scanning or sandboxing. Keep execution on an isolated disposable worker with restricted egress, no production secrets, resource/time limits, and cleanup. The shared API/worker tokens are machine-to-machine credentials, not multi-user authentication. Do not expose public APK execution until identity/ownership, quotas, storage retention, and host isolation have been reviewed. See [docs/SECURITY.md](docs/SECURITY.md), [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), and [worker/README.md](worker/README.md).
 
 ## License
 
