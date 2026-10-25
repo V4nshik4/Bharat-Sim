@@ -12,10 +12,10 @@ import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -121,6 +121,18 @@ class LogAnalysisRequest(BaseModel):
     persona_id: str = "budget-android"
     run_id: str | None = None
 
+class WorkerClaimRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9._-]+$")
+
+class WorkerHeartbeatRequest(BaseModel):
+    lease_token: str = Field(min_length=32, max_length=200)
+
+class WorkerResultRequest(BaseModel):
+    lease_token: str = Field(min_length=32, max_length=200)
+    status: Literal["completed", "failed"]
+    result: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = Field(default=None, max_length=2000)
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -145,6 +157,18 @@ def init_db() -> None:
             id TEXT PRIMARY KEY, created_at TEXT NOT NULL, run_id TEXT,
             persona_id TEXT NOT NULL, result_json TEXT NOT NULL
         )""")
+        # Backward-compatible schema migration for databases created by earlier MVP commits.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
+        migrations = {
+            "lease_token": "TEXT",
+            "lease_until": "TEXT",
+            "worker_id": "TEXT",
+            "updated_at": "TEXT",
+            "attempts": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, definition in migrations.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {column} {definition}")
 
 init_db()
 
@@ -312,17 +336,24 @@ async def create_run(
             target.unlink(missing_ok=True)
             raise
         apk_name, apk_hash, apk_path = safe_name, digest.hexdigest(), str(target)
-    status = "awaiting_worker"
+    worker_configured = len(os.getenv("BHARATSIM_WORKER_TOKEN", "")) >= 32
+    status = "queued" if apk_path and worker_configured else "awaiting_worker"
+    created = utcnow()
     with db() as conn:
         conn.execute(
-            "INSERT INTO runs(id,created_at,status,apk_name,apk_sha256,apk_path,persona_id,result_json,error) VALUES(?,?,?,?,?,?,?,?,?)",
-            (run_id, utcnow(), status, apk_name, apk_hash, apk_path, persona_id, None, None),
+            "INSERT INTO runs(id,created_at,status,apk_name,apk_sha256,apk_path,persona_id,result_json,error,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (run_id, created, status, apk_name, apk_hash, apk_path, persona_id, None, None, created),
         )
+    message = (
+        "APK queued for an authenticated worker. Execution is not complete until the worker submits evidence."
+        if status == "queued" else
+        "Upload recorded. No execution worker is configured, so this run is awaiting a worker; no APK execution is claimed."
+    )
     return {
-        "id": run_id, "created_at": utcnow(), "status": status,
+        "id": run_id, "created_at": created, "status": status,
         "apk": {"name": apk_name, "sha256": apk_hash, "uploaded": bool(apk_name)},
         "persona": PERSONAS[persona_id],
-        "message": "Upload recorded. This draft has no worker dispatch integration; no APK execution is claimed." ,
+        "message": message,
     }
 
 @app.get("/api/v1/runs")
@@ -331,6 +362,112 @@ def list_runs(limit: int = 25):
     with db() as conn:
         rows = conn.execute("SELECT id,created_at,status,apk_name,apk_sha256,persona_id,error FROM runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
     return {"items": [dict(row) for row in rows]}
+
+def require_worker_token(request: Request) -> None:
+    """Authenticate a separately deployed worker with a high-entropy shared secret."""
+    expected = os.getenv("BHARATSIM_WORKER_TOKEN", "")
+    if len(expected) < 32:
+        raise HTTPException(status_code=503, detail="Worker integration is not configured")
+    supplied = request.headers.get("X-BharatSim-Worker-Token", "")
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Missing or invalid worker token")
+
+
+@app.post("/internal/worker/claim")
+def worker_claim(request: Request, payload: WorkerClaimRequest):
+    require_worker_token(request)
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat()
+    lease_until = datetime.fromtimestamp(now.timestamp() + 300, timezone.utc).isoformat()
+    lease_token = uuid.uuid4().hex + uuid.uuid4().hex
+    with db() as conn:
+        conn.execute(
+            "UPDATE runs SET status='queued', lease_token=NULL, lease_until=NULL, worker_id=NULL, updated_at=? "
+            "WHERE status='leased' AND lease_until < ? AND attempts < 3",
+            (now_text, now_text),
+        )
+        conn.execute(
+            "UPDATE runs SET status='failed', error='Worker lease expired after maximum attempts', updated_at=? "
+            "WHERE status='leased' AND lease_until < ? AND attempts >= 3",
+            (now_text, now_text),
+        )
+        row = conn.execute(
+            "SELECT id,apk_name,apk_sha256,persona_id,attempts FROM runs "
+            "WHERE status='queued' AND apk_path IS NOT NULL ORDER BY created_at ASC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return {"job": None}
+        updated = conn.execute(
+            "UPDATE runs SET status='leased', lease_token=?, lease_until=?, worker_id=?, attempts=attempts+1, updated_at=? "
+            "WHERE id=? AND status='queued'",
+            (lease_token, lease_until, payload.worker_id, now_text, row["id"]),
+        )
+        if updated.rowcount != 1:
+            return {"job": None}
+        return {"job": {
+            "id": row["id"], "apk_name": row["apk_name"], "apk_sha256": row["apk_sha256"],
+            "persona_id": row["persona_id"], "attempt": row["attempts"] + 1,
+            "lease_token": lease_token, "lease_until": lease_until,
+            "apk_url": f"/internal/worker/runs/{row['id']}/apk",
+            "heartbeat_url": f"/internal/worker/runs/{row['id']}/heartbeat",
+            "result_url": f"/internal/worker/runs/{row['id']}/result",
+        }}
+
+
+def require_live_lease(conn: sqlite3.Connection, run_id: str, lease_token: str) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT id,status,lease_token,lease_until,apk_path FROM runs WHERE id=?", (run_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if row["status"] != "leased" or not row["lease_token"] or not hmac.compare_digest(row["lease_token"], lease_token):
+        raise HTTPException(status_code=409, detail="Worker lease is stale or no longer owns this run")
+    if row["lease_until"] and row["lease_until"] < utcnow():
+        raise HTTPException(status_code=409, detail="Worker lease expired; claim the job again")
+    return row
+
+
+@app.get("/internal/worker/runs/{run_id}/apk")
+def worker_download_apk(run_id: str, request: Request, lease_token: str):
+    require_worker_token(request)
+    with db() as conn:
+        row = require_live_lease(conn, run_id, lease_token)
+        path = Path(row["apk_path"]).resolve()
+        if not path.is_file() or path.parent != UPLOAD_DIR.resolve():
+            raise HTTPException(status_code=410, detail="APK artifact is no longer available")
+        return FileResponse(path, media_type="application/vnd.android.package-archive", filename=f"{run_id}.apk")
+
+
+@app.post("/internal/worker/runs/{run_id}/heartbeat")
+def worker_heartbeat(run_id: str, request: Request, payload: WorkerHeartbeatRequest):
+    require_worker_token(request)
+    now = datetime.now(timezone.utc)
+    new_lease = datetime.fromtimestamp(now.timestamp() + 300, timezone.utc).isoformat()
+    with db() as conn:
+        require_live_lease(conn, run_id, payload.lease_token)
+        conn.execute(
+            "UPDATE runs SET lease_until=?, updated_at=? WHERE id=? AND status='leased' AND lease_token=?",
+            (new_lease, now.isoformat(), run_id, payload.lease_token),
+        )
+    return {"ok": True, "lease_until": new_lease}
+
+
+@app.post("/internal/worker/runs/{run_id}/result")
+def worker_submit_result(run_id: str, request: Request, payload: WorkerResultRequest):
+    require_worker_token(request)
+    encoded = json.dumps(payload.result, ensure_ascii=False)
+    if len(encoded.encode("utf-8")) > 250_000:
+        raise HTTPException(status_code=413, detail="Worker result exceeds the 250 KB inline limit")
+    with db() as conn:
+        require_live_lease(conn, run_id, payload.lease_token)
+        if payload.status == "completed" and payload.result.get("status") != "completed":
+            raise HTTPException(status_code=422, detail="Completed result must include report status=completed")
+        conn.execute(
+            "UPDATE runs SET status=?, result_json=?, error=?, lease_token=NULL, lease_until=NULL, updated_at=? WHERE id=?",
+            (payload.status, encoded, payload.error, utcnow(), run_id),
+        )
+    return {"id": run_id, "status": payload.status, "evidence_saved": True}
+
 
 @app.get("/api/v1/runs/{run_id}")
 def get_run(run_id: str):
@@ -361,16 +498,18 @@ def list_analyses(limit: int = 20):
 
 @app.get("/api/v1/capabilities")
 def capabilities():
-    worker = bool(os.getenv("BHARATSIM_WORKER_URL"))
+    worker = len(os.getenv("BHARATSIM_WORKER_TOKEN", "")) >= 32
     return {
         "apk_upload": True, "log_analysis": True, "risk_planner": True,
         "failure_fingerprinting": True, "bharat_score": True,
-        "android_execution": False,
+        "android_execution": worker,
+        "worker_dispatch": worker,
         "network_shaping": False,
-        "sarvam_translation": bool(os.getenv("SARVAM_API_KEY")),
+        "sarvam_translation": False,
         "notes": [
-            "Android execution is not integrated in this draft, even if a worker URL environment variable is present.",
-            "Network shaping is not claimed by this API-only build.",
-            "Sarvam integration is not yet wired; the flag only reports whether credentials are configured.",
+            "Worker dispatch is enabled only when BHARATSIM_WORKER_TOKEN is configured; a live worker and emulator are still required for execution.",
+            "Network shaping is not claimed by the API; configured profiles must be verified on the actual emulator traffic path.",
+            "Sarvam translation is not wired into this application.",
+            "Worker result payloads are bounded and protected by lease tokens; inline artifact payloads are limited to 250 KB.",
         ],
     }
