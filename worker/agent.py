@@ -114,10 +114,16 @@ def run_job(base_url: str, token: str, serial: str, job: dict[str, Any], duratio
                 report = {"status": "failed", "error": "Runner did not produce a report", "runner_return_code": completed.returncode}
             report.pop("device_serial", None)
             report.pop("logcat_artifact", None)
+            # Keep the report well below the API's 250 KB JSON limit even with non-ASCII log text.
+            for step in report.get("steps", []):
+                if isinstance(step, dict):
+                    for field in ("stdout_tail", "stderr_tail"):
+                        if field in step:
+                            step[field] = str(step[field])[-800:]
             log_files = list(artifact_dir.glob("*.logcat.txt"))
             if log_files:
-                # Keep inline evidence bounded; full artifact storage is a separate production concern.
-                report["logcat_tail"] = log_files[0].read_text(encoding="utf-8", errors="replace")[-80_000:]
+                # Full artifact storage is a separate production concern.
+                report["logcat_tail"] = log_files[0].read_text(encoding="utf-8", errors="replace")[-30_000:]
             report["runner_return_code"] = completed.returncode
             if completed.stderr:
                 report["runner_stderr_tail"] = completed.stderr[-4_000:]
