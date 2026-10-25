@@ -1,55 +1,88 @@
 # BharatSim 🇮🇳
 
-**The Cheap Phone Test** — test Android apps under constrained device and unreliable-network conditions, and explain failures with traceable evidence.
+**The Cheap Phone Test** — test Android apps under constrained device and unreliable-network conditions, then explain failures with traceable evidence.
 
-> Status: early MVP scaffold. A successful analysis of uploaded logs is not the same as running an APK on an Android worker; the runner must explicitly report when that worker is unavailable.
+> **Status: MVP with an authenticated worker-dispatch prototype.** The API, responsive dashboard, log analysis, risk planner, APK upload validation, lease-based job protocol, and local ADB smoke worker are implemented. A real public deployment, production sandbox review, verified network impairment, and physical-device validation are not yet verified.
 
-## MVP capabilities
-- Bharat personas for constrained device/network scenarios.
-- Risk-ranked deterministic test plans.
-- APK upload size limits, APK-like ZIP structure checks, archive complexity bounds and SHA-256 fingerprinting.
-- Run/job API with persisted metadata and honest worker readiness.
-- Log ingestion, crash/ANR signal detection, failure fingerprints, evidence-linked diagnostics, and transparent BharatScore.
-- React/Vite dashboard for configuring personas, submitting APKs, and viewing API results.
-- Optional single shared-key gate for private deployments; proper multi-user authentication is not yet implemented.
+## What works in this repository
+
+- Four named Bharat test personas and deterministic risk-ranked scenario planning.
+- APK upload size limits, APK-like ZIP structure checks, bounded archive metadata, and SHA-256 fingerprinting.
+- FastAPI endpoints with SQLite persistence for run metadata and log analyses.
+- Worker queue with authenticated job claims, short-lived leases, heartbeats, APK download authorization, result callbacks, stale-result rejection, and bounded inline report JSON.
+- Optional polling worker that runs an explicitly enabled ADB smoke test against a configured disposable Android device.
+- Deterministic logcat signal analysis, failure fingerprints, evidence-linked findings, and a transparent heuristic BharatScore.
+- React/Vite dashboard with run history, worker heartbeat status, log analysis, and report inspection.
+- CI for backend tests, frontend production build, and worker safety guards.
+
+## What is not complete
+
+- No public production URL or deployed commit has been verified.
+- No real emulator run has been performed in this work session. CI protocol fixtures are synthetic test data and are not device execution evidence.
+- App-specific Appium/UiAutomator journeys are not implemented.
+- Network shaping and RAM/storage pressure are not wired to the worker or verified against emulator traffic.
+- Multi-user identity, per-user run ownership, durable object storage, and production-grade sandbox isolation are not implemented.
+- Sarvam translation is not wired into the product.
 
 ## Architecture
-- `backend/`: FastAPI API, SQLite persistence, analysis engine, upload handling.
-- `frontend/`: Vite + React dashboard.
-- `backend/tests/`: backend unit, API and upload-security tests.\n- `worker/`: opt-in local ADB smoke runner and guarded Linux `tc/netem` adapter for dedicated test interfaces.
-- `docs/`: architecture, API contract, validation and roadmap.
+
+- backend/: FastAPI API, SQLite persistence, upload handling, log analysis, run/job lifecycle, and worker callbacks.
+- frontend/: Vite + React dashboard.
+- backend/tests/: backend, upload-security, and worker-protocol tests.
+- worker/agent.py: authenticated polling worker using Python's standard library.
+- worker/runner.py: bounded ADB install/launch/logcat smoke runner.
+- worker/network_shaper.py: guarded Linux tc/netem prototype; not integrated into job execution.
+- docs/: architecture, API, security, open-source references, and roadmap.
 
 ## Run locally
+
 ### Backend
-```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
+
+    cd backend
+    python -m venv .venv
+    source .venv/bin/activate  # Windows: .venv\Scripts\activate
+    pip install -r requirements.txt
+    uvicorn app.main:app --reload --port 8000
+
 Open http://localhost:8000/docs and http://localhost:8000/health/ready.
 
 ### Frontend
-```bash
-cd frontend
-npm install
-npm run dev
-```
-Set `VITE_API_BASE_URL=http://localhost:8000` in `frontend/.env.local` if the API is not on the default origin. Never put private keys in `VITE_*` variables.
+
+    cd frontend
+    npm install
+    npm run dev
+
+The frontend uses same-origin API requests by default. Set VITE_API_BASE_URL=http://localhost:8000 in frontend/.env.local only if needed. Never put private keys in VITE_* variables.
+
+### Worker
+
+See worker/README.md. Configure BHARATSIM_WORKER_TOKEN on the API and worker, provide an HTTPS BHARATSIM_API_URL, configure an explicit disposable ANDROID_SERIAL, and opt in with BHARATSIM_ENABLE_LOCAL_APK_EXECUTION=true. Do not run unknown APKs on a personal device or an unisolated host.
 
 ### Tests
-```bash
-cd backend
-pip install -r requirements-dev.txt
-pytest -q
-```
 
-## Important execution boundary
-APK installation and interactive device execution require Android SDK/ADB and a provisioned emulator/physical-device worker. The API does not claim that an APK was executed unless a configured worker reports an actual run. Without one, it can analyze uploaded logs or report the run as awaiting a worker. Network shaping depends on host privileges and emulator topology; every constraint must be recorded as verified or unsupported.
+    cd backend
+    pip install -r requirements-dev.txt
+    pytest -q
+    cd ..
+    python -m unittest worker.tests.test_network_shaper
+    python -m py_compile worker/agent.py worker/runner.py
+    cd frontend
+    npm ci
+    npm run build
 
-## Security notes
-Treat uploaded APKs as untrusted. Run execution in an isolated, disposable worker with no production secrets, restricted network egress, resource/time limits, and cleanup. Do not execute uploaded APKs in the API process. The optional shared API key is a private-deployment guard, not user/tenant authentication. See [docs/SECURITY.md](docs/SECURITY.md). Do not upload sensitive crash logs to third-party AI services without consent.\n\nThe guarded network shaper is documented in [worker/NETWORK_SHAPING.md](worker/NETWORK_SHAPING.md). It configures only a dedicated test veth's outbound traffic and does not by itself prove emulator traffic traverses that interface. The local runner and shaper are not connected to API dispatch yet.
+## API and execution truth
+
+- /health/live reports process liveness; /health/ready checks database availability.
+- /api/v1/capabilities reports implemented features and limitations.
+- /api/v1/workers reports worker heartbeats seen in the last 90 seconds.
+- Runs remain queued/awaiting a worker until the worker claims them. A run becomes completed or failed only after an authenticated worker result is accepted.
+- A completed smoke run means the runner finished install/launch/observation/log collection; it is not proof of broad app correctness.
+- Network and device constraints must be reported as verified, unverified, or unsupported. The current worker does not apply them.
+
+## Security
+
+Treat every uploaded APK as untrusted code. APK archive checks are not malware scanning or sandboxing. Keep execution on an isolated disposable worker with restricted egress, no production secrets, resource/time limits, and cleanup. The shared API/worker tokens are machine-to-machine credentials, not multi-user authentication. Do not expose public APK execution until identity/ownership, quotas, storage retention, and host isolation have been reviewed. See the security and worker documentation.
 
 ## License
-MIT — see `LICENSE`.
+
+MIT — see LICENSE.
