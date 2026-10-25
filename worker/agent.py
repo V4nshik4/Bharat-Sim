@@ -6,6 +6,7 @@ throwaway emulator/device. This agent uses Python's standard library only.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -58,6 +59,7 @@ def download_apk(base_url: str, token: str, job: dict[str, Any], target: Path) -
         },
     )
     total = 0
+    digest = hashlib.sha256()
     with urllib.request.urlopen(req, timeout=60) as response, target.open("wb") as output:
         while True:
             chunk = response.read(1024 * 1024)
@@ -66,9 +68,14 @@ def download_apk(base_url: str, token: str, job: dict[str, Any], target: Path) -
             total += len(chunk)
             if total > 150 * 1024 * 1024:
                 raise WorkerError("Downloaded APK exceeds the 150 MiB worker limit")
+            digest.update(chunk)
             output.write(chunk)
     if total == 0:
         raise WorkerError("API returned an empty APK")
+    expected = str(job.get("apk_sha256") or "")
+    if len(expected) != 64 or digest.hexdigest() != expected:
+        target.unlink(missing_ok=True)
+        raise WorkerError("Downloaded APK SHA-256 does not match the queued run")
 
 
 def run_job(base_url: str, token: str, serial: str, job: dict[str, Any], duration: int) -> None:
