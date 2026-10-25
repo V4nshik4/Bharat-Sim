@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -13,7 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -21,7 +23,10 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("BHARATSIM_DATA_DIR", str(APP_DIR.parent / "data")))
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "bharatsim.sqlite3"
-MAX_UPLOAD_BYTES = int(os.getenv("BHARATSIM_MAX_UPLOAD_MB", "150")) * 1024 * 1024
+MAX_UPLOAD_BYTES = max(1, min(int(os.getenv("BHARATSIM_MAX_UPLOAD_MB", "150")), 150)) * 1024 * 1024
+MAX_APK_ENTRIES = 10000
+MAX_APK_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+MAX_APK_COMPRESSION_RATIO = 200
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -38,6 +43,41 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+@app.middleware("http")
+async def enforce_shared_api_key(request: Request, call_next):
+    """Optional single shared-key gate for private deployments; not multi-tenant auth."""
+    if request.url.path.startswith("/api/v1/") and os.getenv("BHARATSIM_REQUIRE_API_KEY", "false").lower() == "true":
+        expected = os.getenv("BHARATSIM_API_KEY", "")
+        if len(expected) < 32:
+            return JSONResponse(status_code=503, content={"detail": "API authentication is required but BHARATSIM_API_KEY is not configured safely"})
+        supplied = request.headers.get("X-BharatSim-API-Key", "")
+        if not hmac.compare_digest(supplied, expected):
+            return JSONResponse(status_code=401, content={"detail": "Missing or invalid API key"})
+    return await call_next(request)
+
+
+def validate_apk_archive(path: Path) -> None:
+    """Bound central-directory complexity before any archive content is decompressed."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            if not infos or len(infos) > MAX_APK_ENTRIES:
+                raise HTTPException(status_code=415, detail="APK archive has an invalid or excessive entry count")
+            if "AndroidManifest.xml" not in {item.filename for item in infos}:
+                raise HTTPException(status_code=415, detail="ZIP archive is missing AndroidManifest.xml and is not a valid APK")
+            uncompressed = 0
+            for item in infos:
+                if item.flag_bits & 0x1:
+                    raise HTTPException(status_code=415, detail="Encrypted APK archive entries are not accepted")
+                uncompressed += item.file_size
+                if uncompressed > MAX_APK_UNCOMPRESSED_BYTES:
+                    raise HTTPException(status_code=413, detail="APK expands beyond the allowed uncompressed size")
+                if item.file_size > 0:
+                    if item.compress_size == 0 or item.file_size / item.compress_size > MAX_APK_COMPRESSION_RATIO:
+                        raise HTTPException(status_code=415, detail="APK contains a suspicious compression ratio")
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=415, detail="Uploaded APK is not a valid ZIP archive")
 
 PERSONAS: dict[str, dict[str, Any]] = {
     "budget-android": {
@@ -193,12 +233,18 @@ def health_live():
 
 @app.get("/health/ready")
 def health_ready():
-    worker_configured = False  # Worker dispatch/result callbacks are not implemented in this draft.
+    try:
+        with db() as conn:
+            conn.execute("SELECT 1").fetchone()
+        database_ok = True
+    except sqlite3.Error:
+        database_ok = False
     return {
-        "status": "ready" if DB_PATH.exists() else "not_ready",
-        "database": "available" if DB_PATH.exists() else "missing",
+        "status": "ready" if database_ok else "not_ready",
+        "database": "available" if database_ok else "unavailable",
         "apk_execution_worker": "not_integrated",
         "execution_capability": "external-worker-required",
+        "authentication_required": os.getenv("BHARATSIM_REQUIRE_API_KEY", "false").lower() == "true",
         "timestamp": utcnow(),
     }
 
@@ -261,14 +307,7 @@ async def create_run(
             if prefix[:2] != b"PK":
                 target.unlink(missing_ok=True)
                 raise HTTPException(status_code=415, detail="File does not look like a ZIP-based APK (missing PK header)")
-            try:
-                with zipfile.ZipFile(target) as zf:
-                    bad = zf.testzip()
-                    if bad:
-                        raise HTTPException(status_code=415, detail="APK archive failed integrity check")
-            except zipfile.BadZipFile:
-                target.unlink(missing_ok=True)
-                raise HTTPException(status_code=415, detail="Uploaded APK is not a valid ZIP archive")
+            validate_apk_archive(target)
         except Exception:
             target.unlink(missing_ok=True)
             raise
