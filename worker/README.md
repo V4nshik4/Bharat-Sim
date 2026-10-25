@@ -51,6 +51,6 @@ An expired lease can be retried up to three claims. A stale or duplicate result 
 
 ## Runner output and limitations
 
-A completed smoke run means install/launch/observation/log collection completed; it does not mean the application passed every user journey. A fatal marker is recorded as evidence but is not automatically equated with a full test failure. The current runner does not automate app-specific UI journeys, apply network shaping, or impose RAM/storage pressure. Those capabilities must remain labeled unsupported until separately implemented and verified.
+A completed smoke run means install/launch/observation/log collection completed without a detected fatal crash marker; it does not mean the application passed every user journey. A fatal crash marker during the observation window fails the smoke run. Absence of a marker does not prove the app is healthy. The current runner does not automate app-specific UI journeys, apply network shaping, or impose RAM/storage pressure. Those capabilities must remain labeled unsupported until separately implemented and verified.
 
 The guarded network shaper is documented in NETWORK_SHAPING.md. It must only be used with a dedicated test interface, and applying a qdisc does not prove emulator traffic traversed it.
