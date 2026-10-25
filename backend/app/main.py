@@ -157,6 +157,10 @@ def init_db() -> None:
             id TEXT PRIMARY KEY, created_at TEXT NOT NULL, run_id TEXT,
             persona_id TEXT NOT NULL, result_json TEXT NOT NULL
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS workers (
+            id TEXT PRIMARY KEY, last_seen TEXT NOT NULL, status TEXT NOT NULL,
+            current_run_id TEXT
+        )""")
         # Backward-compatible schema migration for databases created by earlier MVP commits.
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
         migrations = {
@@ -382,6 +386,11 @@ def worker_claim(request: Request, payload: WorkerClaimRequest):
     lease_token = uuid.uuid4().hex + uuid.uuid4().hex
     with db() as conn:
         conn.execute(
+            "INSERT INTO workers(id,last_seen,status,current_run_id) VALUES(?,?,?,NULL) "
+            "ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen,status='idle',current_run_id=NULL",
+            (payload.worker_id, now_text, "idle"),
+        )
+        conn.execute(
             "UPDATE runs SET status='queued', lease_token=NULL, lease_until=NULL, worker_id=NULL, updated_at=? "
             "WHERE status='leased' AND lease_until < ? AND attempts < 3",
             (now_text, now_text),
@@ -404,6 +413,10 @@ def worker_claim(request: Request, payload: WorkerClaimRequest):
         )
         if updated.rowcount != 1:
             return {"job": None}
+        conn.execute(
+            "UPDATE workers SET last_seen=?, status='running', current_run_id=? WHERE id=?",
+            (now_text, row["id"], payload.worker_id),
+        )
         return {"job": {
             "id": row["id"], "apk_name": row["apk_name"], "apk_sha256": row["apk_sha256"],
             "persona_id": row["persona_id"], "attempt": row["attempts"] + 1,
@@ -449,6 +462,10 @@ def worker_heartbeat(run_id: str, request: Request, payload: WorkerHeartbeatRequ
             "UPDATE runs SET lease_until=?, updated_at=? WHERE id=? AND status='leased' AND lease_token=?",
             (new_lease, now.isoformat(), run_id, payload.lease_token),
         )
+        conn.execute(
+            "UPDATE workers SET last_seen=?,status='running',current_run_id=? WHERE id=(SELECT worker_id FROM runs WHERE id=?)",
+            (now.isoformat(), run_id, run_id),
+        )
     return {"ok": True, "lease_until": new_lease}
 
 
@@ -462,11 +479,34 @@ def worker_submit_result(run_id: str, request: Request, payload: WorkerResultReq
         require_live_lease(conn, run_id, payload.lease_token)
         if payload.status == "completed" and payload.result.get("status") != "completed":
             raise HTTPException(status_code=422, detail="Completed result must include report status=completed")
+        worker = conn.execute("SELECT worker_id FROM runs WHERE id=?", (run_id,)).fetchone()
         conn.execute(
             "UPDATE runs SET status=?, result_json=?, error=?, lease_token=NULL, lease_until=NULL, updated_at=? WHERE id=?",
             (payload.status, encoded, payload.error, utcnow(), run_id),
         )
+        if worker and worker["worker_id"]:
+            conn.execute(
+                "UPDATE workers SET last_seen=?,status='idle',current_run_id=NULL WHERE id=?",
+                (utcnow(), worker["worker_id"]),
+            )
     return {"id": run_id, "status": payload.status, "evidence_saved": True}
+
+
+@app.get("/api/v1/workers")
+def worker_status():
+    now = datetime.now(timezone.utc)
+    with db() as conn:
+        rows = conn.execute("SELECT id,last_seen,status,current_run_id FROM workers ORDER BY last_seen DESC LIMIT 50").fetchall()
+    items = []
+    for row in rows:
+        try:
+            seen = datetime.fromisoformat(row["last_seen"])
+            online = (now - seen).total_seconds() <= 90
+        except (TypeError, ValueError):
+            online = False
+        items.append({"id": row["id"], "last_seen": row["last_seen"], "status": row["status"] if online else "offline",
+                      "online": online, "current_run_id": row["current_run_id"] if online else None})
+    return {"items": items, "online_count": sum(1 for item in items if item["online"]})
 
 
 @app.get("/api/v1/runs/{run_id}")
