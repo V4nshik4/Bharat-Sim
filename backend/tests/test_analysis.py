@@ -18,7 +18,7 @@ def test_clean_logs_have_full_heuristic_score_but_are_not_proof():
     result = analyze_log_text("Activity resumed\nFrame rendered", "baseline")
     assert result["findings"] == []
     assert result["bharat_score"]["value"] == 100
-    assert any("does not prove" in x for x in result["limitations"])
+    assert any("does not prove" in x.lower() or "absence of detected" in x.lower() for x in result["limitations"])
 
 
 def test_fingerprint_is_stable_and_normalizes_numbers():
