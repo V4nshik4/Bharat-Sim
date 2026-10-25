@@ -1,0 +1,337 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import time
+import uuid
+import zipfile
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+APP_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("BHARATSIM_DATA_DIR", str(APP_DIR.parent / "data")))
+UPLOAD_DIR = DATA_DIR / "uploads"
+DB_PATH = DATA_DIR / "bharatsim.sqlite3"
+MAX_UPLOAD_BYTES = int(os.getenv("BHARATSIM_MAX_UPLOAD_MB", "150")) * 1024 * 1024
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+app = FastAPI(
+    title="BharatSim API",
+    version="0.1.0",
+    description="Evidence-first Android resilience testing. APK execution requires a separately provisioned worker.",
+)
+allowed_origins = [x.strip() for x in os.getenv("BHARATSIM_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if x.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+PERSONAS: dict[str, dict[str, Any]] = {
+    "budget-android": {
+        "id": "budget-android", "name": "Budget Android", "device": "Android 10 · 2 GB RAM",
+        "ram_mb": 2048, "storage_free_mb": 600, "network": "unstable-4g",
+        "latency_ms": 180, "down_kbps": 1200, "up_kbps": 350, "packet_loss_pct": 2,
+        "battery_saver": True, "risk": "high",
+        "description": "Constrained memory and storage with variable mobile connectivity.",
+    },
+    "edge-village": {
+        "id": "edge-village", "name": "Edge / weak signal", "device": "Android 11 · 3 GB RAM",
+        "ram_mb": 3072, "storage_free_mb": 900, "network": "high-latency",
+        "latency_ms": 450, "down_kbps": 256, "up_kbps": 96, "packet_loss_pct": 8,
+        "battery_saver": True, "risk": "critical",
+        "description": "Slow throughput, high latency and intermittent packet loss.",
+    },
+    "storage-pressure": {
+        "id": "storage-pressure", "name": "Low storage", "device": "Android 10 · 2 GB RAM",
+        "ram_mb": 2048, "storage_free_mb": 180, "network": "moderate-4g",
+        "latency_ms": 90, "down_kbps": 2500, "up_kbps": 700, "packet_loss_pct": 0,
+        "battery_saver": False, "risk": "high",
+        "description": "Small free-storage budget to expose cache and download assumptions.",
+    },
+    "baseline": {
+        "id": "baseline", "name": "Baseline", "device": "Android 14 · 6 GB RAM",
+        "ram_mb": 6144, "storage_free_mb": 8000, "network": "good-4g",
+        "latency_ms": 35, "down_kbps": 12000, "up_kbps": 3000, "packet_loss_pct": 0,
+        "battery_saver": False, "risk": "low",
+        "description": "Control profile for comparison; still runs only when a worker is available.",
+    },
+}
+
+class PlanRequest(BaseModel):
+    persona_ids: list[str] = Field(default_factory=lambda: ["budget-android", "edge-village"])
+    app_category: str = "general"
+    critical_flows: list[str] = Field(default_factory=lambda: ["cold start", "login", "primary action", "network retry"])
+    max_scenarios: int = Field(default=6, ge=1, le=20)
+
+class LogAnalysisRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1_000_000)
+    persona_id: str = "budget-android"
+    run_id: str | None = None
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+@contextmanager
+def db():
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+def init_db() -> None:
+    with db() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS runs (
+            id TEXT PRIMARY KEY, created_at TEXT NOT NULL, status TEXT NOT NULL,
+            apk_name TEXT, apk_sha256 TEXT, apk_path TEXT, persona_id TEXT NOT NULL,
+            result_json TEXT, error TEXT
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS analyses (
+            id TEXT PRIMARY KEY, created_at TEXT NOT NULL, run_id TEXT,
+            persona_id TEXT NOT NULL, result_json TEXT NOT NULL
+        )""")
+
+init_db()
+
+def failure_fingerprint(line: str) -> str:
+    normalized = re.sub(r"0x[0-9a-fA-F]+", "<HEX>", line)
+    normalized = re.sub(r"\b\d+\b", "<N>", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+    return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+def analyze_log_text(text: str, persona_id: str = "budget-android") -> dict[str, Any]:
+    """Deterministic baseline detector. Signals are evidence, not proof of root cause."""
+    if persona_id not in PERSONAS:
+        raise ValueError("Unknown persona_id")
+    lines = text.splitlines()
+    rules = [
+        ("crash", re.compile(r"FATAL EXCEPTION|Fatal signal|Process .* has died|SIGSEGV", re.I), "Application crash signal"),
+        ("anr", re.compile(r"ANR in |Application Not Responding|Input dispatching timed out", re.I), "Application-not-responding signal"),
+        ("oom", re.compile(r"OutOfMemoryError|Failed to allocate .*bytes|low memory killer|lmkd.*kill", re.I), "Memory pressure signal"),
+        ("network", re.compile(r"UnknownHostException|SocketTimeoutException|ConnectException|ECONNRESET|Network is unreachable", re.I), "Network failure signal"),
+        ("strictmode", re.compile(r"StrictMode policy violation|disk read on main thread|disk write on main thread", re.I), "Potential main-thread blocking signal"),
+        ("storage", re.compile(r"ENOSPC|No space left on device|SQLiteFullException", re.I), "Storage exhaustion signal"),
+    ]
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, line in enumerate(lines, start=1):
+        for kind, pattern, title in rules:
+            if pattern.search(line):
+                fingerprint = failure_fingerprint(f"{kind}:{line}")
+                key = (kind, fingerprint)
+                if key not in seen:
+                    seen.add(key)
+                    findings.append({
+                        "id": fingerprint, "kind": kind, "title": title,
+                        "severity": "critical" if kind in ("crash", "anr", "oom") else "high" if kind in ("storage", "network") else "medium",
+                        "evidence": [{"line": index, "text": line[:600]}],
+                        "fingerprint": fingerprint,
+                        "explanation": {
+                            "crash": "The log contains a fatal process or exception marker. Inspect the adjacent stack trace to locate the originating frame.",
+                            "anr": "The log contains an ANR or input-dispatch timeout marker. Main-thread traces and timing are needed to confirm the blocking operation.",
+                            "oom": "The log contains a memory allocation or low-memory marker. Compare heap/native memory, process importance and device RAM.",
+                            "network": "The log contains a connection or timeout failure. Check retry behavior, cancellation, timeout budgets and offline UI state.",
+                            "strictmode": "The log contains a StrictMode or main-thread disk I/O marker. Profile the affected interaction before attributing user-visible jank.",
+                            "storage": "The log contains a storage exhaustion marker. Check free-space handling, cache eviction and write-failure recovery.",
+                        }[kind],
+                        "recommendation": {
+                            "crash": "Review the first app-owned frame in the full stack trace and add a regression test for this path.",
+                            "anr": "Capture a thread dump and move blocking I/O or long work off the main thread.",
+                            "oom": "Capture a memory profile; bound caches and release large references on lifecycle transitions.",
+                            "network": "Use bounded retries with exponential backoff, explicit timeouts and a recoverable offline state.",
+                            "strictmode": "Move disk operations off the main thread and measure frame latency around the affected flow.",
+                            "storage": "Handle ENOSPC explicitly and test cache cleanup and failed writes with low free space.",
+                        }[kind],
+                    })
+                break
+    critical = sum(1 for x in findings if x["severity"] == "critical")
+    high = sum(1 for x in findings if x["severity"] == "high")
+    medium = sum(1 for x in findings if x["severity"] == "medium")
+    # Transparent heuristic, not a market/population estimate.
+    score = max(0, min(100, 100 - critical * 28 - high * 14 - medium * 6))
+    return {
+        "id": str(uuid.uuid4()), "created_at": utcnow(), "persona": PERSONAS[persona_id],
+        "source": "uploaded-log-text", "evidence_lines": len(lines),
+        "findings": findings, "summary": {
+            "finding_count": len(findings), "critical": critical, "high": high, "medium": medium,
+            "clean": len(findings) == 0,
+        },
+        "bharat_score": {
+            "value": score, "label": "Log resilience heuristic",
+            "method": "100 − 28×critical − 14×high − 6×medium, clamped to 0–100",
+            "warning": "Based only on detected markers in supplied logs; not a device-population estimate or proof of app quality.",
+        },
+        "limitations": [
+            "Log markers are heuristic signals and may include false positives or miss failures.",
+            "Root-cause statements are hypotheses until corroborated by full traces and reproduction.",
+            "This analysis does not mean the APK was installed or executed.",
+        ],
+    }
+
+@app.get("/")
+def root():
+    return {"name": "BharatSim API", "version": "0.1.0", "docs": "/docs", "status": "development"}
+
+@app.get("/health/live")
+def health_live():
+    return {"status": "alive", "timestamp": utcnow()}
+
+@app.get("/health/ready")
+def health_ready():
+    worker_configured = bool(os.getenv("BHARATSIM_WORKER_URL"))
+    return {
+        "status": "ready" if DB_PATH.exists() else "not_ready",
+        "database": "available" if DB_PATH.exists() else "missing",
+        "apk_execution_worker": "configured" if worker_configured else "not_configured",
+        "execution_capability": "external-worker-required",
+        "timestamp": utcnow(),
+    }
+
+@app.get("/api/v1/personas")
+def list_personas():
+    return {"items": list(PERSONAS.values())}
+
+@app.post("/api/v1/plan")
+def create_plan(request: PlanRequest):
+    unknown = sorted(set(request.persona_ids) - set(PERSONAS))
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown persona IDs: {', '.join(unknown)}")
+    scenarios = []
+    for pid in request.persona_ids:
+        persona = PERSONAS[pid]
+        for flow in request.critical_flows:
+            score = 25
+            score += 25 if persona["risk"] == "critical" else 15 if persona["risk"] == "high" else 0
+            score += 15 if any(k in flow.lower() for k in ("network", "retry", "payment", "login")) else 0
+            score += 10 if persona["storage_free_mb"] < 300 else 0
+            scenarios.append({
+                "id": f"{pid}:{re.sub(r'[^a-z0-9]+', '-', flow.lower()).strip('-')}",
+                "persona_id": pid, "persona_name": persona["name"], "flow": flow,
+                "risk_score": min(100, score),
+                "reason": "Risk heuristic prioritizes constrained profiles and network-sensitive flows; score is a test-ordering aid, not predicted failure probability.",
+            })
+    scenarios.sort(key=lambda x: (-x["risk_score"], x["id"]))
+    selected = scenarios[:request.max_scenarios]
+    return {"generated_at": utcnow(), "strategy": "deterministic-risk-heuristic-v1", "scenarios": selected, "total_candidates": len(scenarios)}
+
+@app.post("/api/v1/runs")
+async def create_run(
+    persona_id: str = Form("budget-android"),
+    apk: UploadFile | None = File(default=None),
+):
+    if persona_id not in PERSONAS:
+        raise HTTPException(status_code=422, detail="Unknown persona_id")
+    run_id = str(uuid.uuid4())
+    apk_name = None
+    apk_hash = None
+    apk_path = None
+    if apk is not None and apk.filename:
+        safe_name = Path(apk.filename).name[:180]
+        if not safe_name.lower().endswith(".apk"):
+            raise HTTPException(status_code=415, detail="Upload must have an .apk filename")
+        target = UPLOAD_DIR / f"{run_id}.apk"
+        digest = hashlib.sha256()
+        total = 0
+        prefix = b""
+        try:
+            with target.open("wb") as out:
+                while chunk := await apk.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_UPLOAD_BYTES:
+                        raise HTTPException(status_code=413, detail=f"APK exceeds {MAX_UPLOAD_BYTES // (1024*1024)} MB limit")
+                    if len(prefix) < 4:
+                        prefix += chunk[:4-len(prefix)]
+                    digest.update(chunk)
+                    out.write(chunk)
+            if prefix[:2] != b"PK":
+                target.unlink(missing_ok=True)
+                raise HTTPException(status_code=415, detail="File does not look like a ZIP-based APK (missing PK header)")
+            try:
+                with zipfile.ZipFile(target) as zf:
+                    bad = zf.testzip()
+                    if bad:
+                        raise HTTPException(status_code=415, detail="APK archive failed integrity check")
+            except zipfile.BadZipFile:
+                target.unlink(missing_ok=True)
+                raise HTTPException(status_code=415, detail="Uploaded APK is not a valid ZIP archive")
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        apk_name, apk_hash, apk_path = safe_name, digest.hexdigest(), str(target)
+    status = "queued" if os.getenv("BHARATSIM_WORKER_URL") else "awaiting_worker"
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO runs(id,created_at,status,apk_name,apk_sha256,apk_path,persona_id,result_json,error) VALUES(?,?,?,?,?,?,?,?,?)",
+            (run_id, utcnow(), status, apk_name, apk_hash, apk_path, persona_id, None, None),
+        )
+    return {
+        "id": run_id, "created_at": utcnow(), "status": status,
+        "apk": {"name": apk_name, "sha256": apk_hash, "uploaded": bool(apk_name)},
+        "persona": PERSONAS[persona_id],
+        "message": "Upload recorded. No APK execution is claimed: configure and connect a sandboxed Android worker to execute this run." if status == "awaiting_worker" else "Queued for the configured worker; confirm worker-side status before treating it as executed.",
+    }
+
+@app.get("/api/v1/runs")
+def list_runs(limit: int = 25):
+    limit = max(1, min(limit, 100))
+    with db() as conn:
+        rows = conn.execute("SELECT id,created_at,status,apk_name,apk_sha256,persona_id,error FROM runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return {"items": [dict(row) for row in rows]}
+
+@app.get("/api/v1/runs/{run_id}")
+def get_run(run_id: str):
+    with db() as conn:
+        row = conn.execute("SELECT id,created_at,status,apk_name,apk_sha256,persona_id,result_json,error FROM runs WHERE id=?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
+    result = dict(row)
+    result["result"] = json.loads(result.pop("result_json")) if result.get("result_json") else None
+    return result
+
+@app.post("/api/v1/analyze/logs")
+def analyze_logs(request: LogAnalysisRequest):
+    if request.persona_id not in PERSONAS:
+        raise HTTPException(status_code=422, detail="Unknown persona_id")
+    result = analyze_log_text(request.text, request.persona_id)
+    with db() as conn:
+        conn.execute("INSERT INTO analyses(id,created_at,run_id,persona_id,result_json) VALUES(?,?,?,?,?)",
+                     (result["id"], result["created_at"], request.run_id, request.persona_id, json.dumps(result)))
+    return result
+
+@app.get("/api/v1/analyses")
+def list_analyses(limit: int = 20):
+    limit = max(1, min(limit, 100))
+    with db() as conn:
+        rows = conn.execute("SELECT result_json FROM analyses ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return {"items": [json.loads(row["result_json"]) for row in rows]}
+
+@app.get("/api/v1/capabilities")
+def capabilities():
+    worker = bool(os.getenv("BHARATSIM_WORKER_URL"))
+    return {
+        "apk_upload": True, "log_analysis": True, "risk_planner": True,
+        "failure_fingerprinting": True, "bharat_score": True,
+        "android_execution": worker,
+        "network_shaping": False,
+        "sarvam_translation": bool(os.getenv("SARVAM_API_KEY")),
+        "notes": [
+            "Android execution is only enabled when a real worker is configured and integrated.",
+            "Network shaping is not claimed by this API-only build.",
+            "Sarvam integration is not yet wired; the flag only reports whether credentials are configured.",
+        ],
+    }
