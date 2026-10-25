@@ -28,6 +28,11 @@ def run_cmd(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[s
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
 
 
+def valid_package_name(value: str) -> bool:
+    """Allow ordinary Java-style package identifiers only; reject shell syntax."""
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+", value))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("apk", type=Path)
@@ -115,7 +120,7 @@ def main() -> int:
         package_name = match.group(1)
         # The package name is later passed to an adb shell command. Validate it
         # strictly to prevent APK-controlled shell metacharacters reaching the device.
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+", package_name):
+        if not valid_package_name(package_name):
             raise RuntimeError("APK contains an invalid Android package name")
         report["package_name"] = package_name
 
