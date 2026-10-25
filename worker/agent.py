@@ -30,6 +30,19 @@ class WorkerError(RuntimeError):
     pass
 
 
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward machine credentials to a redirect target."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_SAFE_OPENER = urllib.request.build_opener(NoRedirectHandler())
+
+
+def safe_urlopen(request: urllib.request.Request, timeout: int):
+    return _SAFE_OPENER.open(request, timeout=timeout)
+
+
 def request_json(base_url: str, token: str, path: str, payload: dict[str, Any] | None = None, timeout: int = 30) -> dict[str, Any]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -38,7 +51,7 @@ def request_json(base_url: str, token: str, path: str, payload: dict[str, Any] |
         headers={"X-BharatSim-Worker-Token": token, "Content-Type": "application/json", "Accept": "application/json"},
         method="GET" if payload is None else "POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as response:
+    with safe_urlopen(req, timeout=timeout) as response:
         data = response.read(MAX_RESPONSE_BYTES + 1)
     if len(data) > MAX_RESPONSE_BYTES:
         raise WorkerError("API response exceeds the configured size limit")
@@ -60,7 +73,7 @@ def download_apk(base_url: str, token: str, job: dict[str, Any], target: Path) -
     )
     total = 0
     digest = hashlib.sha256()
-    with urllib.request.urlopen(req, timeout=60) as response, target.open("wb") as output:
+    with safe_urlopen(req, timeout=60) as response, target.open("wb") as output:
         while True:
             chunk = response.read(1024 * 1024)
             if not chunk:
