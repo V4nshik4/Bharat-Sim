@@ -54,8 +54,20 @@ def main() -> int:
             parser.error("APK does not have a ZIP archive signature")
     try:
         with zipfile.ZipFile(apk) as archive:
-            if archive.testzip():
-                parser.error("APK archive failed integrity check")
+            entries = archive.infolist()
+            if not entries or len(entries) > 10000:
+                parser.error("APK archive has an invalid or excessive entry count")
+            if "AndroidManifest.xml" not in {entry.filename for entry in entries}:
+                parser.error("APK archive is missing AndroidManifest.xml")
+            uncompressed = 0
+            for entry in entries:
+                if entry.flag_bits & 0x1:
+                    parser.error("Encrypted archive entries are not accepted")
+                uncompressed += entry.file_size
+                if uncompressed > 1024 * 1024 * 1024:
+                    parser.error("APK expands beyond the 1 GiB metadata limit")
+                if entry.file_size and (entry.compress_size == 0 or entry.file_size / entry.compress_size > 1000):
+                    parser.error("APK contains a suspicious compression ratio")
     except zipfile.BadZipFile:
         parser.error("APK is not a valid ZIP archive")
 
