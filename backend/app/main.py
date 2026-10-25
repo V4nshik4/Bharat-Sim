@@ -301,14 +301,15 @@ def health_ready():
         database_ok = True
     except sqlite3.Error:
         database_ok = False
-    return {
+    payload = {
         "status": "ready" if database_ok else "not_ready",
         "database": "available" if database_ok else "unavailable",
-        "apk_execution_worker": "not_integrated",
+        "apk_execution_worker": "configured" if len(os.getenv("BHARATSIM_WORKER_TOKEN", "")) >= 32 else "not_configured",
         "execution_capability": "external-worker-required",
         "authentication_required": os.getenv("BHARATSIM_REQUIRE_API_KEY", "false").lower() == "true",
         "timestamp": utcnow(),
     }
+    return JSONResponse(status_code=200 if database_ok else 503, content=payload)
 
 @app.get("/api/v1/personas")
 def list_personas():
