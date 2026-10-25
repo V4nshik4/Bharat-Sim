@@ -59,8 +59,7 @@ def test_worker_claim_download_and_result_round_trip(monkeypatch, tmp_path):
 
     downloaded = client.get(
         f"/internal/worker/runs/{run_id}/apk",
-        params={"lease_token": job["lease_token"]},
-        headers=headers,
+        headers={**headers, "X-BharatSim-Lease-Token": job["lease_token"]},
     )
     assert downloaded.status_code == 200
     assert downloaded.content == apk_content
