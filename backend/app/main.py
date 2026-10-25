@@ -516,6 +516,10 @@ def worker_submit_result(run_id: str, request: Request, payload: WorkerResultReq
         lease = require_live_lease(conn, run_id, payload.lease_token)
         if payload.status == "completed" and payload.result.get("status") != "completed":
             raise HTTPException(status_code=422, detail="Completed result must include report status=completed")
+        if payload.status == "failed" and payload.result.get("status") not in (None, "failed"):
+            raise HTTPException(status_code=422, detail="Failed result must not contain a completed report")
+        if payload.result.get("apk_sha256") and payload.result["apk_sha256"] != lease["apk_sha256"]:
+            raise HTTPException(status_code=422, detail="Worker report APK SHA-256 does not match the queued artifact")
         worker = conn.execute("SELECT worker_id FROM runs WHERE id=?", (run_id,)).fetchone()
         conn.execute(
             "UPDATE runs SET status=?, result_json=?, error=?, lease_token=NULL, lease_until=NULL, updated_at=? WHERE id=?",
