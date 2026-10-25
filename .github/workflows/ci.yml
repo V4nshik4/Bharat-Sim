@@ -39,7 +39,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m unittest worker.tests.test_network_shaper worker.tests.test_runner
+      - run: python -m unittest worker.tests.test_network_shaper worker.tests.test_runner worker.tests.test_agent
       - run: python -m py_compile worker/agent.py worker/runner.py worker/network_shaper.py
 
   container-build:
