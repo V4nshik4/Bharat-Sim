@@ -176,6 +176,40 @@ def init_db() -> None:
 
 init_db()
 
+
+def cleanup_expired_uploads() -> None:
+    """Expire abandoned APK uploads after 24 hours and remove old terminal-run APKs."""
+    now = datetime.now(timezone.utc)
+    cutoff = datetime.fromtimestamp(now.timestamp() - 24 * 60 * 60, timezone.utc).isoformat()
+    now_text = now.isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id,apk_path,status,lease_until FROM runs WHERE apk_path IS NOT NULL AND created_at < ?",
+            (cutoff,),
+        ).fetchall()
+        for row in rows:
+            if row["status"] == "leased" and row["lease_until"] and row["lease_until"] >= now_text:
+                continue
+            path = Path(row["apk_path"]).resolve()
+            if path.parent != UPLOAD_DIR.resolve():
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            if row["status"] in ("awaiting_worker", "queued", "leased"):
+                conn.execute(
+                    "UPDATE runs SET status='failed',error='APK upload expired before execution',apk_path=NULL,"
+                    "lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=?",
+                    (now_text, row["id"]),
+                )
+            else:
+                conn.execute("UPDATE runs SET apk_path=NULL WHERE id=?", (row["id"],))
+
+
+cleanup_expired_uploads()
+
+
 def failure_fingerprint(line: str) -> str:
     normalized = re.sub(r"0x[0-9a-fA-F]+", "<HEX>", line)
     normalized = re.sub(r"\b\d+\b", "<N>", normalized)
@@ -308,6 +342,7 @@ async def create_run(
     persona_id: str = Form("budget-android"),
     apk: UploadFile | None = File(default=None),
 ):
+    cleanup_expired_uploads()
     if persona_id not in PERSONAS:
         raise HTTPException(status_code=422, detail="Unknown persona_id")
     run_id = str(uuid.uuid4())
@@ -380,6 +415,7 @@ def require_worker_token(request: Request) -> None:
 @app.post("/internal/worker/claim")
 def worker_claim(request: Request, payload: WorkerClaimRequest):
     require_worker_token(request)
+    cleanup_expired_uploads()
     now = datetime.now(timezone.utc)
     now_text = now.isoformat()
     lease_until = datetime.fromtimestamp(now.timestamp() + 300, timezone.utc).isoformat()
