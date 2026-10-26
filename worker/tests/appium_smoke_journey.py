@@ -16,6 +16,7 @@ from pathlib import Path
 
 BASE = "http://127.0.0.1:4723"
 ADB_SERIAL = "emulator-5554"
+PROBE_BYTES = 500_000
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 PROBE_RE = re.compile(r"HTTP (200|206) · (\d+) ms · (CELLULAR|ETHERNET|WIFI|UNKNOWN|OTHER) · probe (\d+) · bytes (\d+) · attempts (\d+)")
 
@@ -209,7 +210,7 @@ def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: 
         last_text = str(request("GET", f"/session/{session}/element/{element_id}/text", timeout=5).get("value", ""))
         probe = parse_probe_text(last_text)
         if probe and int(probe["sequence"]) > after_sequence:
-            if int(probe["bytes_read"]) != 500_000:
+            if int(probe["bytes_read"]) != PROBE_BYTES:
                 raise RuntimeError(f"Fixture downloaded unexpected payload size: {probe['bytes_read']}")
             return probe
         if "probe failed" in last_text.lower() or "returned http" in last_text.lower():
@@ -362,7 +363,7 @@ def main() -> int:
             "package_name": "org.bharatsim.smokeapp",
             "probe_endpoint": os.getenv("BHARATSIM_PROBE_URL", "not-configured"),
             "probe_endpoint_scope": "Public HTTPS transfer from speed.cloudflare.com; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the simulated cellular route. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
-            "probe_payload_bytes": 500_000,
+            "probe_payload_bytes": PROBE_BYTES,
             "probe_endpoint_ip": expected_ip,
             "probe_logcat": str(probe_logcat_path),
             "assertions": [
