@@ -2,7 +2,7 @@
 
 **The Cheap Phone Test** — test Android apps under constrained device and unreliable-network conditions, then explain failures with traceable evidence.
 
-> **Status: MVP with an authenticated worker-dispatch prototype.** The API, responsive dashboard, log analysis, risk planner, APK upload validation, lease-based job protocol, and local ADB smoke worker are implemented. The GitHub Actions Android emulator workflow exercises the real local API → queue → worker → ADB → callback → saved-report path using a source-built fixture APK. A historical cellular experiment measured three baseline and three shaped HTTPS requests to `example.com` (88 ms baseline median, 233 ms shaped median, 145 ms increase with 150 ms configured) and verified reset; that historical result is not a substitute for the current release candidate's tests. The current routed-probe candidate is being revalidated because its host-routable endpoint failed with `ConnectException` and public DNS remained unreliable from the emulator. The workflow now resolves the public HTTPS endpoint on the CI host, pins the resulting IP for the fixture socket, and retains the URL hostname for TLS SNI and certificate validation. This avoids emulator DNS without substituting a local response. The current candidate must pass repeated latency/bandwidth assertions before those controls are described as verified. No such candidate pass is claimed yet. Packet loss, resource pressure, public deployment, production sandboxing, and physical-device fidelity remain unverified.
+> **Status: MVP with an authenticated worker-dispatch prototype.** The API, responsive dashboard, log analysis, risk planner, APK upload validation, lease-based job protocol, and local ADB smoke worker are implemented. The GitHub Actions Android emulator workflow exercises the real local API → queue → worker → ADB → callback → saved-report path using a source-built fixture APK. A historical cellular experiment measured three baseline and three shaped HTTPS requests to `example.com` (88 ms baseline median, 233 ms shaped median, 145 ms increase with 150 ms configured) and verified reset; that historical result is not a substitute for the current release candidate's tests. The current routed-probe candidate is being revalidated because its host-routable endpoint failed with `ConnectException` and public DNS remained unreliable from the emulator. The workflow now resolves the public HTTPS endpoint on the CI host, pins the resulting IP for the fixture socket, and retains the URL hostname for TLS SNI and certificate validation. This avoids emulator DNS without substituting a local response. The current candidate must pass repeated latency/bandwidth assertions before those controls are described as verified. No such candidate pass is claimed yet. Packet loss and CPU throttling remain unsupported; RAM is report-only; public deployment, production sandboxing, and physical-device fidelity remain unverified. Battery-saver and bounded storage-pressure simulation are implemented for disposable emulator targets with readback/reset evidence.
 
 ## What works in this repository
 
@@ -22,7 +22,7 @@
 - No public production URL or deployed commit has been verified.
 - A real disposable Android emulator workflow has passed for the source-built BharatSim fixture: upload → queue/lease → ADB install/launch/logcat → authenticated callback → persisted report, followed by an Appium UI action assertion and screenshot. This validates the fixture pipeline only; it does not validate arbitrary third-party APKs or production isolation.
 - Appium/UiAutomator2 is integrated for a fixture-app primary-action journey. Product-specific test-flow authoring, broader assertion coverage, and arbitrary-app compatibility remain incomplete.
-- Emulator console latency and upload/download bandwidth controls are wired to the worker and read back from the emulator. The CI fixture has verified a baseline-versus-shaped HTTPS latency increase and confirmed reset readback. Packet loss, CPU/RAM/storage pressure, and battery-saver behavior remain unsupported, and arbitrary app traffic is not proven.
+- Emulator console latency and upload/download bandwidth controls are wired to the worker and read back from the emulator. Battery-saver and bounded storage-pressure simulation are wired for disposable emulator targets with cleanup/readback evidence. Packet loss and CPU throttling remain unsupported, RAM is report-only, and arbitrary app traffic is not proven.
 - Multi-user identity, per-user run ownership, durable object storage, and production-grade sandbox isolation are not implemented.
 - Sarvam translation is not wired into the product.
 
@@ -33,6 +33,8 @@
 - backend/tests/: backend, upload-security, and worker-protocol tests.
 - worker/agent.py: authenticated polling worker using Python's standard library.
 - worker/runner.py: bounded ADB install/launch/logcat smoke runner with guarded Android Emulator console latency/bandwidth controls, exact control-plane readback, and reset verification.
+- worker/condition_planner.py: persona-to-condition planning with explicit supported, control-plane-verifiable, report-only, and unsupported classifications.
+- worker/condition_applicator.py: reversible battery-saver/storage-pressure application, RAM readback, structured condition evidence, and cleanup/reset handling.
 - worker/network_shaper.py: guarded Linux tc/netem prototype; not integrated into Android job execution. `scripts/ci/network-shaper-e2e.sh` measures traffic across an isolated shaped veth in CI.
 - docs/: architecture, API, security, open-source references, and roadmap.
 
@@ -89,8 +91,10 @@ See worker/README.md. Configure BHARATSIM_WORKER_TOKEN on the API and worker, pr
 - /api/v1/workers reports worker heartbeats seen in the last 90 seconds.
 - Runs remain queued/awaiting a worker until the worker claims them. A run becomes completed or failed only after an authenticated worker result is accepted.
 - A completed smoke run means the runner finished install/launch/observation/log collection; it is not proof of broad app correctness.
-- Emulator console network latency and bandwidth are reported verified only when control-plane readback matches the request; this does not prove app traffic used the controlled interface.
-- Packet loss, resource pressure, and overall persona enforcement remain unsupported/unverified and must not be described as applied.
+- Emulator condition simulation: network latency, download bandwidth, battery saver, and bounded storage pressure are supported on disposable Android emulators with control-plane readback verification and guaranteed cleanup.
+- Upload bandwidth is control-plane verified, but data-plane throughput remains unverified without an active probe.
+- Emulator control-plane verification does not automatically prove arbitrary application data-plane traffic traversed the shaped network.
+- Packet loss, dynamic RAM restriction, and CPU throttling remain unsupported/report-only and are never faked.
 
 ## Production release gates
 

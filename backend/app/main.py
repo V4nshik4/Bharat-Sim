@@ -615,10 +615,17 @@ def capabilities():
             "arbitrary_app_traffic_verified": False,
             "scope": "Android Emulator console controls; fixture traffic-path evidence is available from CI only",
         },
+        "persona_condition_simulation": {
+            "supported": ["network_latency", "download_bandwidth", "battery_saver", "storage_pressure"],
+            "control_plane_verifiable": ["upload_bandwidth"],
+            "report_only": ["ram_constraint"],
+            "unsupported": ["packet_loss", "cpu_constraint"],
+            "scope": "Worker executes conditions on disposable Android Emulator targets only; active data-plane app traffic is unverified",
+        },
         "sarvam_translation": False,
         "notes": [
             "Worker dispatch is configured only when BHARATSIM_WORKER_TOKEN is set; android_execution remains false here because this API cannot prove a live emulator has executed an APK. Check /api/v1/workers for recent worker heartbeats.",
-            "The worker supports Android Emulator console latency and bandwidth controls with readback and reset verification. Full persona shaping remains false because packet loss, outage/recovery, resource pressure, and arbitrary-app traffic verification are not supported.",
+            "The worker supports Android Emulator console latency and bandwidth controls plus reversible battery-saver and bounded storage-pressure simulation with readback/reset evidence. Full persona shaping remains false because packet loss, CPU throttling, RAM restriction, outage/recovery, and arbitrary-app traffic verification are not supported.",
             "Sarvam translation is not wired into this application.",
             "Worker result payloads are bounded and protected by lease tokens; inline artifact payloads are limited to 250 KB.",
         ],
