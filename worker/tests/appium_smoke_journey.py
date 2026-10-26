@@ -337,12 +337,31 @@ def main() -> int:
             raise RuntimeError("Appium screenshot response was empty")
         screenshot_path = args.artifacts / "appium-primary-action.png"
         screenshot_path.write_bytes(base64.b64decode(image_data, validate=True))
+
+        logcat = subprocess.run(
+            ["adb", "-s", ADB_SERIAL, "logcat", "-d", "-t", "2000", "-v", "threadtime"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        if logcat.returncode != 0:
+            raise RuntimeError(f"Could not collect network-probe logcat evidence: {logcat.stderr[-1000:]}")
+        probe_lines = [line for line in logcat.stdout.splitlines() if "BHARATSIM_NETWORK_PROBE" in line]
+        if not probe_lines:
+            raise RuntimeError("No real network-probe markers were found in emulator logcat")
+        observed_ips = set(re.findall(r"endpoint_ip=([0-9.]+)", "\\n".join(probe_lines)))
+        expected_ip = os.getenv("BHARATSIM_PROBE_IP", "")
+        if not expected_ip or observed_ips != {expected_ip}:
+            raise RuntimeError(f"Probe endpoint IP evidence mismatch: expected={expected_ip!r}, observed={sorted(observed_ips)}")
+        probe_logcat_path = args.artifacts / "appium-network-probe.logcat.txt"
+        probe_logcat_path.write_text("\\n".join(probe_lines) + "\\n", encoding="utf-8")
+
         report = {
             "status": "passed",
             "package_name": "org.bharatsim.smokeapp",
             "probe_endpoint": os.getenv("BHARATSIM_PROBE_URL", "not-configured"),
-            "probe_endpoint_scope": "Fixed-size controlled test payload served by the CI host on its routable interface, not the emulator special host alias; bytes traverse the emulator Ethernet route. This verifies the fixture path only, not public-Internet performance or arbitrary uploaded-app traffic.",
+            "probe_endpoint_scope": "Public HTTPS transfer from speed.cloudflare.com; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the simulated cellular route. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
             "probe_payload_bytes": 2_000_000,
+            "probe_endpoint_ip": expected_ip,
+            "probe_logcat": str(probe_logcat_path),
             "assertions": [
                 "primary action is located by stable accessibility identifier",
                 "tap changes the status text to Primary action completed",
