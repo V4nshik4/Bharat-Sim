@@ -13,4 +13,8 @@ export default defineConfig({
       "/health": { target: apiTarget, changeOrigin: true },
     },
   },
+  test: {
+    environment: "jsdom",
+    exclude: ["**/node_modules/**", "**/e2e/**"],
+  },
 });
