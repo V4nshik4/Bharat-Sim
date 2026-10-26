@@ -225,7 +225,7 @@ def main() -> int:
     phase = "configure_baseline_profile"
     evidence: dict[str, object] = {}
     try:
-        phase = "prepare_ethernet_transport"
+        phase = "prepare_cellular_transport"
         prepare_cellular_transport()
         phase = "configure_baseline_profile"
         baseline_profile = set_network_profile(None, "full")
@@ -348,7 +348,7 @@ def main() -> int:
                 "tap changes the status text to Primary action completed",
                 "each probe downloaded exactly 2,000,000 bytes from the public HTTPS endpoint through the Android Emulator network stack",
                 "per-request retry counts are captured in probe evidence",
-                "baseline, latency-only, and bandwidth-only probes used cellular/Ethernet transport",
+                "baseline, latency-only, and bandwidth-only probes used the same simulated cellular transport",
                 "latency-only median duration exceeded baseline by at least 50 ms",
                 "bandwidth-only median duration exceeded baseline by at least 500 ms",
                 "emulator network console readback matched each requested profile",
