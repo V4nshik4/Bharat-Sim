@@ -25,7 +25,7 @@ export BHARATSIM_WORKER_TOKEN="$(python -c 'import secrets; print(secrets.token_
 export BHARATSIM_DATA_DIR="$RUNNER_TEMP/bharatsim-api-data"
 
 mkdir -p artifacts
-: "${BHARATSIM_PROBE_HOST_IP:?workflow must provide the CI host's routable IPv4 address}"
+: "${BHARATSIM_PROBE_HOST_IP:?workflow must provide the CI host routable IPv4 address}"
 export BHARATSIM_PROBE_URL="http://${BHARATSIM_PROBE_HOST_IP}:8001/payload?bytes=2000000"
 
 # Serve a fixed-size test payload on the host's routable interface. Unlike the
