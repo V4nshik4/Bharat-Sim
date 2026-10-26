@@ -142,9 +142,64 @@ Path("artifacts/api-run.report.json").write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
 PY
 
+# Exercise a real worker failure callback with an APK-shaped archive whose
+# manifest is deliberately invalid. This is a negative test fixture only; it
+# must produce a failed run and must never be reported as a successful test.
+python - <<'PY'
+import zipfile
+from pathlib import Path
+with zipfile.ZipFile("artifacts/invalid-manifest.apk", "w", zipfile.ZIP_DEFLATED) as archive:
+    archive.writestr("AndroidManifest.xml", b"not a compiled Android manifest")
+    archive.writestr("classes.dex", b"not dex bytecode")
+PY
+curl --fail --silent --show-error \
+  -F persona_id=baseline \
+  -F "apk=@artifacts/invalid-manifest.apk;type=application/vnd.android.package-archive" \
+  http://127.0.0.1:8000/api/v1/runs > artifacts/negative-upload-response.json
+
+python - <<'PY'
+import json
+import time
+import urllib.request
+from pathlib import Path
+
+uploaded = json.loads(Path("artifacts/negative-upload-response.json").read_text())
+run_id = uploaded["id"]
+if uploaded["status"] != "queued":
+    raise SystemExit(f"Negative fixture was not queued: {uploaded}")
+deadline = time.monotonic() + 90
+final = None
+while time.monotonic() < deadline:
+    with urllib.request.urlopen(f"http://127.0.0.1:8000/api/v1/runs/{run_id}", timeout=5) as response:
+        final = json.load(response)
+    if final["status"] in ("completed", "failed"):
+        break
+    time.sleep(1)
+if not final or final["status"] != "failed":
+    raise SystemExit(f"Invalid APK fixture did not fail closed: {final}")
+result = final.get("result") or {}
+if result.get("status") != "failed":
+    raise SystemExit(f"Failure callback did not preserve runner failure: {result}")
+if result.get("runner_return_code", 0) == 0:
+    raise SystemExit(f"Invalid APK unexpectedly returned runner success: {result}")
+if not result.get("error"):
+    raise SystemExit(f"Failure report did not explain why execution failed: {result}")
+Path("artifacts/negative-run.report.json").write_text(json.dumps({
+    "status": final["status"],
+    "run_id": run_id,
+    "fixture_kind": "intentionally_invalid_apk_manifest",
+    "runner_return_code": result.get("runner_return_code"),
+    "error": result.get("error"),
+    "result_interpretation": result.get("result_interpretation"),
+    "constraints_applied": result.get("constraints_applied"),
+}, indent=2))
+print(json.dumps({"status": final["status"], "fixture_kind": "intentionally_invalid_apk_manifest",
+                  "runner_return_code": result.get("runner_return_code"), "error": result.get("error")}, indent=2))
+PY
+
 # The Appium journey itself establishes a cellular baseline, applies a
-# measured latency profile, issues a second real HTTPS request, and resets
-# emulator settings in its finally block.
+# measured latency profile, issues a real HTTP request, and resets emulator
+# settings in its finally block.
 adb install smoke-android/app/build/outputs/apk/debug/app-debug.apk
 appium --address 127.0.0.1 --port 4723 > artifacts/appium-server.log 2>&1 &
 APPIUM_PID=$!
