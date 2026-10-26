@@ -25,10 +25,26 @@ export BHARATSIM_WORKER_TOKEN="$(python -c 'import secrets; print(secrets.token_
 export BHARATSIM_DATA_DIR="$RUNNER_TEMP/bharatsim-api-data"
 
 mkdir -p artifacts
+: "${BHARATSIM_PROBE_HOST_IP:?workflow must provide the CI host's routable IPv4 address}"
+export BHARATSIM_PROBE_URL="http://${BHARATSIM_PROBE_HOST_IP}:8001/payload?bytes=2000000"
 
-# The Android fixture uses a real public HTTPS payload endpoint. DNS is configured
-# by the emulator workflow; a remote endpoint is required to verify the emulator's
-# actual routed traffic shaping rather than only local host-alias traffic.
+# Serve a fixed-size test payload on the host's routable interface. Unlike the
+# Android Emulator's special 10.0.2.2 host alias, this destination exercises the
+# emulator's routed Ethernet path. The transfer is real; the bytes are controlled
+# test data, and the result is valid only for this fixture/network path.
+python -u scripts/ci/network-probe-server.py > artifacts/network-probe-server.log 2>&1 &
+PROBE_PID=$!
+for attempt in $(seq 1 30); do
+  if curl --fail --silent "http://127.0.0.1:8001/health" >/dev/null; then
+    break
+  fi
+  if [ "$attempt" -eq 30 ]; then
+    cat artifacts/network-probe-server.log >&2 || true
+    echo "Network probe server did not become ready" >&2
+    exit 1
+  fi
+  sleep 1
+done
 (cd backend && exec uvicorn app.main:app --host 0.0.0.0 --port 8000) > artifacts/api.log 2>&1 &
 API_PID=$!
 WORKER_PID=
@@ -39,6 +55,7 @@ cleanup() {
   adb -s emulator-5554 emu network speed full >/dev/null 2>&1 || true
   adb -s emulator-5554 shell svc wifi enable >/dev/null 2>&1 || true
   adb -s emulator-5554 shell svc data enable >/dev/null 2>&1 || true
+  [ -z "$PROBE_PID" ] || kill "$PROBE_PID" 2>/dev/null || true
   [ -z "$APPIUM_PID" ] || kill "$APPIUM_PID" 2>/dev/null || true
   [ -z "$WORKER_PID" ] || kill "$WORKER_PID" 2>/dev/null || true
   [ -z "$API_PID" ] || kill "$API_PID" 2>/dev/null || true
