@@ -296,9 +296,9 @@ def main() -> int:
         baseline_probes, last_sequence = take_samples("baseline", last_sequence)
         evidence["baseline_probes"] = baseline_probes
 
-        # Test bandwidth immediately after baseline to isolate whether the
-        # emulator's named EDGE preset affects the next real HTTP transfer.
-        # The custom profile is 5 Mbps in both directions to avoid the EDGE radio preset stalling HTTPS transfers.
+        # Test bandwidth immediately after baseline with a custom 5 Mbps cap.
+        # The 2 MB transfer makes the expected throughput effect observable while
+        # avoiding the EDGE radio preset, which stalled the HTTPS request.
         phase = "configure_bandwidth_profile"
         bandwidth_profile = set_network_profile(None, "5000:5000")
         evidence["bandwidth_profile"] = bandwidth_profile
