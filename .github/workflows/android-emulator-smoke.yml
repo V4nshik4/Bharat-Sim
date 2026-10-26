@@ -131,8 +131,8 @@ jobs:
           arch: x86_64
           profile: pixel_2
           disable-animations: true
-          # The emulator maps the host loopback DNS resolver to its guest-side DNS alias; shaping is verified by measured app traffic.
-          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -dns-server 127.0.0.1
+          # Use the actual upstream DNS server discovered from the hosted runner; 127.0.0.1 would refer to the guest itself.
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -dns-server ${{ steps.upstream-dns.outputs.server }}
           script: bash scripts/ci/android-emulator-e2e.sh
       - name: Generate evidence artifact manifest
         if: always()
