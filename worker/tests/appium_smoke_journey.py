@@ -65,6 +65,7 @@ def speed_limits_bps(speed: str) -> tuple[int, int]:
     presets = {
         "full": (0, 0),
         "umts": (384_000, 384_000),
+        "edge": (118_400, 236_800),
     }
     if speed in presets:
         return presets[speed]
@@ -208,7 +209,7 @@ def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: 
         last_text = str(request("GET", f"/session/{session}/element/{element_id}/text", timeout=5).get("value", ""))
         probe = parse_probe_text(last_text)
         if probe and int(probe["sequence"]) > after_sequence:
-            if int(probe["bytes_read"]) != 2_000_000:
+            if int(probe["bytes_read"]) != 500_000:
                 raise RuntimeError(f"Fixture downloaded unexpected payload size: {probe['bytes_read']}")
             return probe
         if "probe failed" in last_text.lower() or "returned http" in last_text.lower():
@@ -290,7 +291,7 @@ def main() -> int:
         # speed control itself affects the next real HTTP transfer. A 5 Mbps
         # cap is below the unbounded baseline but keeps the 2 MB transfer bounded.
         phase = "configure_bandwidth_profile"
-        bandwidth_profile = set_network_profile(None, "5000:5000")
+        bandwidth_profile = set_network_profile(None, "edge")
         evidence["bandwidth_profile"] = bandwidth_profile
         phase = "bandwidth_samples"
         bandwidth_probes, last_sequence = take_samples("bandwidth-only", last_sequence)
@@ -367,7 +368,7 @@ def main() -> int:
             "assertions": [
                 "primary action is located by stable accessibility identifier",
                 "tap changes the status text to Primary action completed",
-                "each probe downloaded exactly 2,000,000 bytes from the public HTTPS endpoint through the Android Emulator network stack",
+                "each probe downloaded exactly 500,000 bytes from the public HTTPS endpoint through the Android Emulator network stack",
                 "per-request retry counts are captured in probe evidence",
                 "baseline, latency-only, and bandwidth-only probes used the same simulated cellular transport",
                 "latency-only median duration exceeded baseline by at least 50 ms",
