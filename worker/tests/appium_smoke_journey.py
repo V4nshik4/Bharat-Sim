@@ -50,12 +50,12 @@ def adb(*args: str, timeout: int = 20) -> str:
 
 def set_network_profile(latency_ms: int | None, speed: str = "full") -> dict:
     """Configure emulator latency and throughput, then require exact console readback."""
-    # Use the emulator Ethernet path: the console shaping controls apply to Ethernet
-    # and cellular, but cellular DNS was intermittent in hosted CI. Disable Wi-Fi and
-    # cellular data so the external HTTPS request uses Ethernet, then verify transport.
+    # Use cellular with a controlled local HTTP endpoint to remove external DNS
+    # as a variable while measuring real TCP payload transfer through Android.
     adb("shell", "svc", "wifi", "disable")
-    adb("emu", "gsm", "data", "off")
-    adb("shell", "svc", "data", "disable")
+    adb("emu", "gsm", "voice", "home")
+    adb("emu", "gsm", "data", "home")
+    adb("shell", "svc", "data", "enable")
     latency = "none" if latency_ms is None else str(latency_ms)
     adb("emu", "network", "delay", latency)
     adb("emu", "network", "speed", speed)
@@ -179,7 +179,7 @@ def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: 
             bytes_read = int(match.group(4))
             if bytes_read != 2000000:
                 raise RuntimeError(f"Fixture downloaded unexpected payload size: {bytes_read}")
-            return {"duration_ms": int(match.group(1)), "transport": match.group(2), "sequence": int(match.group(3)), "bytes_read": bytes_read}
+            return {"duration_ms": int(match.group(1)), "transport": match.group(2), "sequence": int(match.group(3)), "bytes_read": bytes_read, "attempts": int(match.group(5))}
         if "probe failed" in last_text.lower() or "returned http" in last_text.lower():
             raise RuntimeError(f"Fixture network probe failed: {last_text}")
         time.sleep(0.5)
@@ -291,13 +291,15 @@ def main() -> int:
         report = {
             "status": "passed",
             "package_name": "org.bharatsim.smokeapp",
-            "probe_endpoint": "https://speed.cloudflare.com/__down?bytes=2000000",
+            "probe_endpoint": "http://10.0.2.2:8001/payload?bytes=2000000",
+            "probe_endpoint_scope": "local CI test server via Android Emulator host gateway; not public-internet evidence",
             "probe_payload_bytes": 2000000,
             "assertions": [
                 "fixture title is visible",
                 "primary action is located by stable accessibility identifier",
                 "tap changes the status text to Primary action completed",
-                "each probe downloaded exactly 2,000,000 bytes from the real public HTTPS response",
+                "each probe downloaded exactly 2,000,000 bytes from the controlled CI HTTP server through the emulator network stack",
+                "per-request retry counts are captured in probe evidence",
                 "baseline, latency-only, and bandwidth-only probes used cellular/Ethernet transport",
                 "latency-only median duration exceeded baseline by at least 50 ms",
                 "bandwidth-only median duration exceeded baseline by at least 500 ms",
