@@ -16,6 +16,8 @@
 - [x] Security model, worker setup, open-source references, and explicit feature/limitation documentation.
 - [x] Network shaper apply parses and compares `tc`-reported delay, jitter, loss and rate settings.
 - [x] CI creates a disposable Linux network namespace and veth pair, measures actual ping RTT before and after shaping, requires the configured delay to be observable, and verifies qdisc cleanup. This proves the Linux prototype on that veth only.
+- [x] Pass server-authored persona network targets to the worker; apply Android Emulator console latency and upload/download speed controls, read back the configured values, and verify restoration to defaults after each run.
+- [x] Complete a differential traffic-path experiment in a disposable emulator: one warm-up, three baseline and three shaped real HTTPS requests to `example.com` over CELLULAR. Latest passing evidence: baseline median 88 ms, shaped median 233 ms, observed increase 145 ms under a configured 150 ms delay. Emulator console readback matched the requested profile, then reset readback verified zero latency and default bandwidth. This proves the source-built fixture path only.
 - [x] Add a separate CI workflow that boots an Android emulator, starts a local API and authenticated worker, verifies upload → queue → ADB execution → result callback → persisted report, then checks an Appium primary-action journey with a screenshot artifact.
 
 ## Remaining before calling execution fully functional
@@ -33,8 +35,9 @@
 
 - [x] Implement and pass the Appium/UiAutomator2 fixture journey with explicit steps, assertions, screenshots, and repeatable checkpoints.
 - [ ] Add app-specific journey authoring, broader assertions, and error-state coverage for arbitrary uploaded applications.
-- [ ] Wire network profiles to an isolated Android-emulator traffic path and verify actual emulator requests traverse the shaper. The current CI measurement proves only a dedicated Linux veth path, not emulator routing.
-- [ ] Run baseline, latency, bandwidth, packet-loss, outage, and recovery experiments; record requested vs verified conditions. The current runner now explicitly reports `constraints_applied=false` rather than implying persona constraints were enforced.
+- [x] Verify a real request from the source-built fixture is measurably slower under the active emulator profile than its baseline on the same cellular/Ethernet transport. Latest CI: median 88 ms baseline vs 233 ms shaped, +145 ms; network profile reset verified.
+- [ ] Extend traffic-path verification to arbitrary app-specific requests and repeated baseline/latency/bandwidth/recovery experiments.
+- [ ] Run real app-request baseline, latency, bandwidth, packet-loss, outage, and recovery experiments; record requested vs verified conditions. Delay/bandwidth control readback exists, but packet loss and outage are not implemented, and `constraints_applied=false` remains until the full persona is enforced.
 - [ ] Add supported RAM/storage/CPU pressure controls or report those constraints as unsupported.
 - [ ] Validate at least one low-cost physical Android device before making real-device fidelity claims.
 

@@ -12,21 +12,29 @@ until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true
 done
 
 export ANDROID_SERIAL=emulator-5554
+# Preserve the emulator's available network so the fixture can make a real HTTP
+# request. If the active transport is Wi-Fi, the report must keep traffic-path
+# verification false unless a supported transport is actually observed.
 export BHARATSIM_ENABLE_LOCAL_APK_EXECUTION=true
 export BHARATSIM_API_URL=http://127.0.0.1:8000
 export BHARATSIM_ALLOW_INSECURE_HTTP=true
 export BHARATSIM_WORKER_ID=ci-emulator-worker
 export BHARATSIM_POLL_SECONDS=1
-export BHARATSIM_SMOKE_DURATION_SECONDS=5
+export BHARATSIM_SMOKE_DURATION_SECONDS=20
 export BHARATSIM_WORKER_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 export BHARATSIM_DATA_DIR="$RUNNER_TEMP/bharatsim-api-data"
 
 mkdir -p artifacts
-(cd backend && exec uvicorn app.main:app --host 127.0.0.1 --port 8000) > artifacts/api.log 2>&1 &
+(cd backend && exec uvicorn app.main:app --host 0.0.0.0 --port 8000) > artifacts/api.log 2>&1 &
 API_PID=$!
 WORKER_PID=
 APPIUM_PID=
 cleanup() {
+  # Always restore network controls, even when Appium assertions fail.
+  adb -s emulator-5554 emu network delay none >/dev/null 2>&1 || true
+  adb -s emulator-5554 emu network speed full >/dev/null 2>&1 || true
+  adb -s emulator-5554 shell svc wifi enable >/dev/null 2>&1 || true
+  adb -s emulator-5554 shell svc data enable >/dev/null 2>&1 || true
   [ -z "$APPIUM_PID" ] || kill "$APPIUM_PID" 2>/dev/null || true
   [ -z "$WORKER_PID" ] || kill "$WORKER_PID" 2>/dev/null || true
   [ -z "$API_PID" ] || kill "$API_PID" 2>/dev/null || true
@@ -83,7 +91,19 @@ assert result.get("runner_return_code") == 0, result
 assert result.get("package_name") == "org.bharatsim.smokeapp", result.get("package_name")
 assert result.get("execution_scope") == "install_launch_logcat_smoke", result
 assert result.get("constraints_applied") is False, result
-assert result.get("constraint_verification") == "unsupported_not_applied", result
+network_profile = result.get("network_profile") or {}
+assert network_profile.get("control_plane", {}).get("status") == "verified", network_profile
+assert network_profile.get("network_constraints_applied") is True, network_profile
+# The worker report may claim traffic-path verification only if its own
+# logcat probe observed the required transport and latency. Otherwise it must
+# remain explicitly partial; the separate Appium journey below verifies a
+# real request while a fresh profile is active.
+if network_profile.get("traffic_path_verified") is True:
+    assert str(result.get("constraint_verification", "")).startswith("fixture_network_path_verified"), result
+else:
+    assert network_profile.get("traffic_path_verified") is False, network_profile
+    assert str(result.get("constraint_verification", "")).startswith("partial_network_control_verified"), result
+assert network_profile.get("reset", {}).get("status") == "verified", network_profile
 for step_name in ("install_apk", "launch_app", "collect_logcat"):
     step = next((s for s in result.get("steps", []) if s.get("name") == step_name), None)
     assert step and step.get("return_code") == 0, f"{step_name} failed: {step}"
@@ -105,6 +125,9 @@ Path("artifacts/api-run.report.json").write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
 PY
 
+# The Appium journey itself establishes a cellular baseline, applies a
+# measured latency profile, issues a second real HTTPS request, and resets
+# emulator settings in its finally block.
 adb install smoke-android/app/build/outputs/apk/debug/app-debug.apk
 appium --address 127.0.0.1 --port 4723 > artifacts/appium-server.log 2>&1 &
 APPIUM_PID=$!
