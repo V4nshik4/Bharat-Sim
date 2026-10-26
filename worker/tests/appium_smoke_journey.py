@@ -50,12 +50,13 @@ def adb(*args: str, timeout: int = 20) -> str:
 
 
 def prepare_cellular_transport() -> None:
-    """Select the emulator's simulated cellular route once before paired measurements."""
-    adb("shell", "svc", "wifi", "disable")
+    """Register the simulated cellular network before disabling Wi-Fi."""
+    # The emulator must attach the simulated radio while a working route still
+    # exists; disabling Wi-Fi first can leave the guest with no default route.
     adb("emu", "gsm", "voice", "home")
     adb("emu", "gsm", "data", "home")
+    adb("shell", "svc", "wifi", "disable")
     adb("shell", "svc", "data", "enable")
-    # Let the active cellular route and DNS state settle before sampling.
     time.sleep(5)
 
 
