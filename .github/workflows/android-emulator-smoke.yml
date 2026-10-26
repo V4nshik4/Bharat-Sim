@@ -50,6 +50,10 @@ jobs:
         run: |
           npm install --global appium@3
           appium driver install uiautomator2
+      - name: Install local DNS forwarder for emulator traffic
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dnsmasq-base
       - name: Install Android SDK packages
         shell: bash
         run: |
@@ -117,7 +121,7 @@ jobs:
           profile: pixel_2
           disable-animations: true
           # The probe is served on the CI host's routable interface; shaping is verified by measured app traffic.
-          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -dns-server 168.63.129.16,8.8.8.8
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -dns-server 10.0.2.2
           script: bash scripts/ci/android-emulator-e2e.sh
       - name: Generate evidence artifact manifest
         if: always()
