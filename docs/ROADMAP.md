@@ -31,7 +31,8 @@
 - [x] Provision a disposable Android emulator in GitHub Actions with Android SDK platform-tools and build-tools.
 - [x] Execute a source-built, authorized fixture APK through local FastAPI upload → queue/lease → worker → ADB install/launch/logcat → result callback → persisted run report. The latest recorded workflow passed the API-to-ADB pipeline and fixture Appium assertion; this does not prove arbitrary APK correctness or production isolation.
 - [x] Pass the Appium/UiAutomator2 fixture primary-action UI assertion in the disposable emulator workflow; the workflow asserts that tapping the stable accessibility identifier changes the status text and preserves a screenshot. This is a fixture journey, not a suite for arbitrary apps.
-- [ ] Exercise install failure, launch failure, worker crash, timeout, stale lease, duplicate callback, and retry recovery on a real worker.
+- [x] Exercise a real worker failure callback using an intentionally invalid APK-shaped manifest fixture; assert a nonzero runner exit and an explanatory failed report. This is a negative test fixture, not product evidence.
+- [ ] Exercise install failure on a valid APK, launch failure, worker process crash/timeout, stale lease, duplicate callback, and retry recovery on a real worker.
 - [ ] Verify worker heartbeat state and full run evidence/artifacts survive API restarts. Only run metadata persistence is currently covered by a process-restart integration test.
 - [ ] Capture screenshots and structured crash/ANR/exit evidence; distinguish a completed smoke procedure from a passing app journey.
 
