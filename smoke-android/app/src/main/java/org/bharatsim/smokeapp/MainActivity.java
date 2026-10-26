@@ -151,12 +151,12 @@ public final class MainActivity extends Activity {
                 }
 
                 OutputStream output = tls.getOutputStream();
-                String request = "GET " + requestPath + " HTTP/1.1\\r\\n"
-                        + "Host: " + host + "\\r\\n"
-                        + "Connection: close\\r\\n"
-                        + "Accept-Encoding: identity\\r\\n"
-                        + "Cache-Control: no-cache\\r\\n"
-                        + "Range: bytes=0-" + (expectedBytes - 1) + "\\r\\n\\r\\n";
+                String request = "GET " + requestPath + " HTTP/1.1\r\n"
+                        + "Host: " + host + "\r\n"
+                        + "Connection: close\r\n"
+                        + "Accept-Encoding: identity\r\n"
+                        + "Cache-Control: no-cache\r\n"
+                        + "Range: bytes=0-" + (expectedBytes - 1) + "\r\n\r\n";
                 output.write(request.getBytes(StandardCharsets.US_ASCII));
                 output.flush();
 
@@ -260,7 +260,7 @@ public final class MainActivity extends Activity {
                 if (line.size() == 0) return "";
                 throw new EOFException("Unexpected EOF inside HTTP headers");
             }
-            if (previous == '\\r' && current == '\\n') {
+            if (previous == '\r' && current == '\n') {
                 byte[] bytes = line.toByteArray();
                 return new String(bytes, 0, Math.max(0, bytes.length - 1), StandardCharsets.US_ASCII);
             }
