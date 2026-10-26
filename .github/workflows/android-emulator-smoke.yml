@@ -117,7 +117,7 @@ jobs:
           profile: pixel_2
           disable-animations: true
           # The probe is served on the CI host's routable interface; shaping is verified by measured app traffic.
-          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -dns-server 8.8.8.8,8.8.4.4
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -dns-server 168.63.129.16,8.8.8.8
           script: bash scripts/ci/android-emulator-e2e.sh
       - name: Generate evidence artifact manifest
         if: always()
