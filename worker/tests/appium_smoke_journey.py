@@ -48,13 +48,12 @@ def adb(*args: str, timeout: int = 20) -> str:
     return output
 
 
-def prepare_cellular_transport() -> None:
-    """Select cellular once before sampling; don't flap connectivity between profiles."""
+def prepare_ethernet_transport() -> None:
+    """Use the emulator's supported Ethernet route; do not force the cellular radio."""
     adb("shell", "svc", "wifi", "disable")
-    adb("emu", "gsm", "voice", "home")
-    adb("emu", "gsm", "data", "home")
-    adb("shell", "svc", "data", "enable")
-    # Allow the active route and DNS state to settle before the first measurement.
+    adb("shell", "svc", "data", "disable")
+    # Android Emulator console latency/speed controls cover Ethernet and cellular,
+    # not the newer netsim Wi-Fi path. Keep one supported route stable for all samples.
     time.sleep(5)
 
 
@@ -224,8 +223,8 @@ def main() -> int:
     phase = "configure_baseline_profile"
     evidence: dict[str, object] = {}
     try:
-        phase = "prepare_cellular_transport"
-        prepare_cellular_transport()
+        phase = "prepare_ethernet_transport"
+        prepare_ethernet_transport()
         phase = "configure_baseline_profile"
         baseline_profile = set_network_profile(None, "full")
         evidence["baseline_profile"] = baseline_profile
