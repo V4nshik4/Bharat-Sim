@@ -123,7 +123,7 @@ jobs:
       - name: Boot disposable Android emulator and execute runner
         uses: reactivecircus/android-emulator-runner@v2
         env:
-          BHARATSIM_PROBE_URL: https://speed.cloudflare.com/__down?bytes=2000000
+          BHARATSIM_PROBE_URL: https://speed.cloudflare.com/__down?bytes=500000
           BHARATSIM_PROBE_IP: ${{ steps.probe-address.outputs.ip }}
         with:
           api-level: 35
