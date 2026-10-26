@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 import subprocess
 import statistics
@@ -338,8 +339,8 @@ def main() -> int:
         report = {
             "status": "passed",
             "package_name": "org.bharatsim.smokeapp",
-            "probe_endpoint": "https://speed.cloudflare.com/__down?bytes=2000000",
-            "probe_endpoint_scope": "Public Cloudflare speed-test endpoint over HTTPS; measures an actual external transfer through the emulator's routed network path. Results include public endpoint and Internet variability and apply only to the source-built fixture, not arbitrary uploaded apps.",
+            "probe_endpoint": os.getenv("BHARATSIM_PROBE_URL", "not-configured"),
+            "probe_endpoint_scope": "Fixed-size controlled test payload served by the CI host on its routable interface, not the emulator special host alias; bytes traverse the emulator Ethernet route. This verifies the fixture path only, not public-Internet performance or arbitrary uploaded-app traffic.",
             "probe_payload_bytes": 2_000_000,
             "assertions": [
                 "primary action is located by stable accessibility identifier",
