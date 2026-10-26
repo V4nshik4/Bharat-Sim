@@ -192,7 +192,7 @@ public final class MainActivity extends Activity {
             return delegate.createSocket(socket, expectedHost, port, autoClose);
         }
 
-        @Override public Socket createSocket() throws IOException { return delegate.createSocket(); }
+        @Override public Socket createSocket() throws IOException { return new PinnedAddressSocket(pinnedIp); }
         @Override public Socket createSocket(String host, int port, InetAddress local, int localPort) throws IOException {
             return delegate.createSocket(host, port, local, localPort);
         }
@@ -204,6 +204,26 @@ public final class MainActivity extends Activity {
         }
         @Override public String[] getDefaultCipherSuites() { return delegate.getDefaultCipherSuites(); }
         @Override public String[] getSupportedCipherSuites() { return delegate.getSupportedCipherSuites(); }
+    }
+
+    private static final class PinnedAddressSocket extends Socket {
+        private final String pinnedIp;
+
+        PinnedAddressSocket(String pinnedIp) {
+            this.pinnedIp = pinnedIp;
+        }
+
+        @Override public void connect(java.net.SocketAddress endpoint, int timeout) throws IOException {
+            if (!(endpoint instanceof InetSocketAddress)) {
+                throw new IOException("Pinned HTTPS probe requires an internet socket address");
+            }
+            int port = ((InetSocketAddress) endpoint).getPort();
+            super.connect(new InetSocketAddress(InetAddress.getByName(pinnedIp), port), timeout);
+        }
+
+        @Override public void connect(java.net.SocketAddress endpoint) throws IOException {
+            connect(endpoint, 0);
+        }
     }
 
     private String activeTransport() {
