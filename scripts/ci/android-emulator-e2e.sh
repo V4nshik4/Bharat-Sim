@@ -40,9 +40,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The workflow passes the host runner upstream DNS resolver directly to the emulator
-# via its documented -dns-server option. This avoids a local UDP/53 forwarder that
-# was not receiving guest queries in the hosted emulator environment.
+# The fixture uses a CI-host-resolved IPv4 address and validates TLS against the
+# HTTPS hostname, so the real transfer does not depend on emulator DNS resolution.
 
 (cd backend && exec uvicorn app.main:app --host 0.0.0.0 --port 8000) > artifacts/api.log 2>&1 &
 API_PID=$!
