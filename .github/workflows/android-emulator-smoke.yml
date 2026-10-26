@@ -100,6 +100,8 @@ jobs:
             exit 1
           fi
           echo "Resolved proof.ovh.net to $ip"
+          # Fail early if the public test endpoint is unavailable from the CI host.
+          curl --fail --silent --show-error --location --range 0-0 --output /dev/null https://proof.ovh.net/files/1Mb.dat
           echo "ip=$ip" >> "$GITHUB_OUTPUT"
       - name: Build known-good test APK
         working-directory: smoke-android
