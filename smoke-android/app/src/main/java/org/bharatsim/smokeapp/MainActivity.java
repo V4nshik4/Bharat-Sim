@@ -15,6 +15,12 @@ import android.widget.Button;
 
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.io.IOException;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLSocketFactory;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "BharatSimNetworkProbe";
@@ -84,7 +90,14 @@ public final class MainActivity extends Activity {
             int bytesRead = 0;
             HttpURLConnection connection = null;
             try {
-                connection = (HttpURLConnection) new URL(PROBE_URL).openConnection();
+                URL probeUrl = new URL(PROBE_URL);
+                connection = (HttpURLConnection) probeUrl.openConnection();
+                if (!(connection instanceof HttpsURLConnection) || BuildConfig.PROBE_IP.equals("0.0.0.0")) {
+                    throw new IOException("HTTPS probe URL and pinned IPv4 address are required");
+                }
+                HttpsURLConnection https = (HttpsURLConnection) connection;
+                https.setSSLSocketFactory(new PinnedProbeSocketFactory(BuildConfig.PROBE_IP, probeUrl.getHost()));
+                https.setHostnameVerifier(HttpsURLConnection.getDefaultHostnameVerifier());
                 connection.setConnectTimeout(5000);
                 connection.setReadTimeout(30000);
                 connection.setRequestMethod("GET");
@@ -115,7 +128,8 @@ public final class MainActivity extends Activity {
                 long duration = SystemClock.elapsedRealtime() - started;
                 Log.i(TAG, "BHARATSIM_NETWORK_PROBE status=HTTP_" + statusCode + " duration_ms=" + duration
                         + " transport=" + transport + " probe=" + sequence
-                        + " bytes_read=" + bytesRead + " attempts=" + attempt);
+                        + " bytes_read=" + bytesRead + " attempts=" + attempt
+                        + " endpoint_host=" + probeUrl.getHost() + " endpoint_ip=" + BuildConfig.PROBE_IP);
                 final String message = "HTTP " + statusCode + " · " + duration + " ms · " + transport
                         + " · probe " + sequence + " · bytes " + bytesRead + " · attempts " + attempt;
                 runOnUiThread(() -> target.setText(message));
@@ -149,6 +163,47 @@ public final class MainActivity extends Activity {
                 }
             }
         }
+    }
+
+
+    /**
+     * Resolve the HTTPS endpoint on the CI host, then connect to that IP from the
+     * emulator while retaining the URL hostname for TLS SNI and certificate checks.
+     * This avoids depending on DNS inside a constrained emulator without disabling
+     * TLS hostname verification or substituting a synthetic/local response.
+     */
+    private static final class PinnedProbeSocketFactory extends SSLSocketFactory {
+        private final SSLSocketFactory delegate = (SSLSocketFactory) SSLSocketFactory.getDefault();
+        private final String pinnedIp;
+        private final String expectedHost;
+
+        PinnedProbeSocketFactory(String pinnedIp, String expectedHost) {
+            this.pinnedIp = pinnedIp;
+            this.expectedHost = expectedHost;
+        }
+
+        @Override public Socket createSocket(String host, int port) throws IOException {
+            Socket raw = new Socket();
+            raw.connect(new InetSocketAddress(InetAddress.getByName(pinnedIp), port), 5000);
+            return delegate.createSocket(raw, expectedHost, port, true);
+        }
+
+        @Override public Socket createSocket(Socket socket, String host, int port, boolean autoClose) throws IOException {
+            return delegate.createSocket(socket, expectedHost, port, autoClose);
+        }
+
+        @Override public Socket createSocket() throws IOException { return delegate.createSocket(); }
+        @Override public Socket createSocket(String host, int port, InetAddress local, int localPort) throws IOException {
+            return delegate.createSocket(host, port, local, localPort);
+        }
+        @Override public Socket createSocket(InetAddress host, int port) throws IOException {
+            return delegate.createSocket(host, port);
+        }
+        @Override public Socket createSocket(InetAddress host, int port, InetAddress local, int localPort) throws IOException {
+            return delegate.createSocket(host, port, local, localPort);
+        }
+        @Override public String[] getDefaultCipherSuites() { return delegate.getDefaultCipherSuites(); }
+        @Override public String[] getSupportedCipherSuites() { return delegate.getSupportedCipherSuites(); }
     }
 
     private String activeTransport() {
