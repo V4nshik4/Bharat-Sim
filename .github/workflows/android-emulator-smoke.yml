@@ -90,8 +90,18 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
+      - name: Determine routable CI host address for network probe
+        id: probe-host
+        run: |
+          ip=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+          test -n "$ip"
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          echo "BHARATSIM_PROBE_HOST_IP=$ip" >> "$GITHUB_ENV"
+          echo "Probe endpoint will use the host's routable address, not the emulator's 10.0.2.2 special alias."
       - name: Build known-good test APK
         working-directory: smoke-android
+        env:
+          BHARATSIM_PROBE_URL: http://${{ steps.probe-host.outputs.ip }}:8001/payload?bytes=2000000
         run: gradle --no-daemon assembleDebug
       - name: Add Android build-tools to PATH
         shell: bash
@@ -114,8 +124,8 @@ jobs:
           arch: x86_64
           profile: pixel_2
           disable-animations: true
-          # Explicit DNS is required because the fixture measures a real public HTTPS download.
-          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -dns-server 8.8.8.8,8.8.4.4
+          # The probe is served on the CI host's routable interface; shaping is verified by measured app traffic.
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
           script: bash scripts/ci/android-emulator-e2e.sh
       - name: Generate evidence artifact manifest
         if: always()
