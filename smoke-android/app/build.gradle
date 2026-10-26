@@ -13,6 +13,7 @@ android {
         versionCode 1
         versionName "1.0"
         buildConfigField "String", "PROBE_URL", "\"${probeUrl}\""
+        buildConfigField "String", "PROBE_IP", "\"${probeIp}\""
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
