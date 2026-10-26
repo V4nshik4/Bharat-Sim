@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 BASE = "http://127.0.0.1:4723"
 ADB_SERIAL = "emulator-5554"
-PROBE_BYTES = 500_000
+PROBE_BYTES = 2_000_000
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 PROBE_RE = re.compile(r"HTTP (200|206) · (\d+) ms · (CELLULAR|ETHERNET|WIFI|UNKNOWN|OTHER) · probe (\d+) · bytes (\d+) · attempts (\d+)")
 
