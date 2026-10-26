@@ -2,6 +2,8 @@ import unittest
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
+from worker.tests.appium_smoke_journey import parse_probe_text
+from worker.tests.appium_smoke_journey import speed_limits_bps
 from worker.runner import (
     apply_emulator_network_profile,
     extract_logcat_signals,
@@ -11,6 +13,42 @@ from worker.runner import (
     run_adb_with_retry,
     valid_package_name,
 )
+
+
+
+
+class AppiumProbeStatusParserTests(unittest.TestCase):
+    def test_parses_full_and_partial_content_probe_status(self):
+        for status in (200, 206):
+            with self.subTest(status=status):
+                parsed = parse_probe_text(
+                    f"HTTP {status} · 123 ms · CELLULAR · probe 8 · bytes 1000000 · attempts 2"
+                )
+                self.assertEqual(parsed, {
+                    "http_status": status,
+                    "duration_ms": 123,
+                    "transport": "CELLULAR",
+                    "sequence": 8,
+                    "bytes_read": 1000000,
+                    "attempts": 2,
+                })
+
+    def test_rejects_running_or_malformed_probe_status(self):
+        self.assertIsNone(parse_probe_text("Network probe running"))
+        self.assertIsNone(parse_probe_text("HTTP 500 · 100 ms · CELLULAR · probe 1 · bytes 0 · attempts 1"))
+
+
+class EmulatorSpeedProfileMappingTests(unittest.TestCase):
+    def test_supported_presets_and_numeric_profiles_have_expected_bits_per_second(self):
+        self.assertEqual(speed_limits_bps("full"), (0, 0))
+        self.assertEqual(speed_limits_bps("umts"), (384_000, 384_000))
+        # Android Emulator API 35 EDGE preset is 473.6 kbps both ways.
+        self.assertEqual(speed_limits_bps("edge"), (473_600, 473_600))
+        self.assertEqual(speed_limits_bps("3000:1200"), (3_000_000, 1_200_000))
+
+    def test_rejects_unknown_speed_profiles(self):
+        with self.assertRaises(ValueError):
+            speed_limits_bps("unknown")
 
 
 class PackageNameValidationTests(unittest.TestCase):
@@ -101,14 +139,16 @@ class EmulatorNetworkProfileTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[1].args[0][-1], "350:1200")
 
     def test_parse_fixture_probe_from_filtered_logcat(self):
-        evidence = parse_fixture_network_probe(
-            "06-01 10:00:00.000 I BharatSimNetworkProbe: "
-            "BHARATSIM_NETWORK_PROBE status=HTTP_200 duration_ms=91 transport=CELLULAR"
-        )
-        self.assertEqual(
-            evidence,
-            {"http_status": 200, "duration_ms": 91, "transport": "CELLULAR"},
-        )
+        for status in (200, 206):
+            with self.subTest(status=status):
+                evidence = parse_fixture_network_probe(
+                    "06-01 10:00:00.000 I BharatSimNetworkProbe: "
+                    f"BHARATSIM_NETWORK_PROBE status=HTTP_{status} duration_ms=91 transport=CELLULAR"
+                )
+                self.assertEqual(
+                    evidence,
+                    {"http_status": status, "duration_ms": 91, "transport": "CELLULAR"},
+                )
 
     def test_refuses_to_claim_emulator_controls_for_physical_device(self):
         with patch("worker.runner.run_cmd") as run:

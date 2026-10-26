@@ -25,24 +25,7 @@ export BHARATSIM_WORKER_TOKEN="$(python -c 'import secrets; print(secrets.token_
 export BHARATSIM_DATA_DIR="$RUNNER_TEMP/bharatsim-api-data"
 
 mkdir -p artifacts
-python scripts/ci/network-probe-server.py > artifacts/network-probe-server.log 2>&1 &
-PROBE_PID=$!
-python - <<'PY'
-import time
-import urllib.request
-deadline = time.monotonic() + 20
-while time.monotonic() < deadline:
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:8001/health", timeout=2) as response:
-            if response.status == 200:
-                break
-    except Exception:
-        time.sleep(0.25)
-else:
-    raise SystemExit("Local CI network probe server did not become ready")
-PY
-(cd backend && exec uvicorn app.main:app --host 0.0.0.0 --port 8000) > artifacts/api.log 2>&1 &
-API_PID=$!
+API_PID=
 WORKER_PID=
 APPIUM_PID=
 cleanup() {
@@ -53,10 +36,15 @@ cleanup() {
   adb -s emulator-5554 shell svc data enable >/dev/null 2>&1 || true
   [ -z "$APPIUM_PID" ] || kill "$APPIUM_PID" 2>/dev/null || true
   [ -z "$WORKER_PID" ] || kill "$WORKER_PID" 2>/dev/null || true
-  [ -z "$PROBE_PID" ] || kill "$PROBE_PID" 2>/dev/null || true
   [ -z "$API_PID" ] || kill "$API_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# The fixture uses a CI-host-resolved IPv4 address and validates TLS against the
+# HTTPS hostname, so the real transfer does not depend on emulator DNS resolution.
+
+(cd backend && exec uvicorn app.main:app --host 0.0.0.0 --port 8000) > artifacts/api.log 2>&1 &
+API_PID=$!
 
 python - <<'PY'
 import time
@@ -142,22 +130,97 @@ Path("artifacts/api-run.report.json").write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
 PY
 
-# Exercise a real worker failure callback with an APK-shaped archive whose
-# manifest is deliberately invalid. This is a negative test fixture only; it
-# must produce a failed run and must never be reported as a successful test.
-python - <<'PY'
+# Exercise a real Android install failure through the worker/API path.
+# The APK is structurally valid and has the same package name as the already
+# installed fixture, but is re-signed with a different key. Android must reject
+# the update because the signatures do not match; the worker must report failure
+# and attempt package cleanup instead of turning the procedure into a success.
+command -v keytool
+command -v apksigner
+adb install smoke-android/app/build/outputs/apk/debug/app-debug.apk
+keytool -genkeypair -noprompt \
+  -keystore artifacts/alternate-signing.jks \
+  -storepass bharatsim-ci-only -keypass bharatsim-ci-only \
+  -alias bharatsim-negative -keyalg RSA -keysize 2048 -validity 2 \
+  -dname "CN=BharatSim CI Install Failure Fixture"
+apksigner sign \
+  --ks artifacts/alternate-signing.jks \
+  --ks-key-alias bharatsim-negative \
+  --ks-pass pass:bharatsim-ci-only \
+  --key-pass pass:bharatsim-ci-only \
+  --out artifacts/alternate-signed.apk \
+  smoke-android/app/build/outputs/apk/debug/app-debug.apk
+curl --fail --silent --show-error \
+  -F persona_id=baseline \
+  -F "apk=@artifacts/alternate-signed.apk;type=application/vnd.android.package-archive" \
+  http://127.0.0.1:8000/api/v1/runs > artifacts/install-failure-upload-response.json
+
+python - <<'PYINSTALLFAIL'
+import json
+import time
+import urllib.request
+from pathlib import Path
+
+uploaded = json.loads(Path("artifacts/install-failure-upload-response.json").read_text())
+run_id = uploaded["id"]
+deadline = time.monotonic() + 120
+final = None
+while time.monotonic() < deadline:
+    with urllib.request.urlopen(f"http://127.0.0.1:8000/api/v1/runs/{run_id}", timeout=5) as response:
+        final = json.load(response)
+    if final["status"] in ("completed", "failed"):
+        break
+    time.sleep(1)
+if not final or final["status"] != "failed":
+    raise SystemExit(f"Signature-conflict APK did not fail closed: {final}")
+result = final.get("result") or {}
+if result.get("status") != "failed" or result.get("runner_return_code") == 0:
+    raise SystemExit(f"Install failure was not preserved by worker callback: {result}")
+if result.get("apk_sha256") != uploaded["apk"]["sha256"]:
+    raise SystemExit("Failed run lost or mismatched the uploaded APK SHA-256")
+steps = {step.get("name"): step for step in result.get("steps", [])}
+install = steps.get("install_apk")
+cleanup = steps.get("cleanup_uninstall")
+if not install or install.get("return_code") == 0:
+    raise SystemExit(f"Expected real Android install failure evidence: {install}")
+if not cleanup or cleanup.get("return_code") != 0:
+    raise SystemExit(f"Expected successful package cleanup after failed install: {cleanup}")
+Path("artifacts/install-failure.report.json").write_text(json.dumps({
+    "status": final["status"],
+    "run_id": run_id,
+    "apk_sha256": result["apk_sha256"],
+    "execution_scope": result.get("execution_scope"),
+    "failure_kind": "android_install_signature_conflict",
+    "install_return_code": install["return_code"],
+    "install_stderr_tail": install.get("stderr_tail", ""),
+    "cleanup_return_code": cleanup["return_code"],
+    "runner_return_code": result["runner_return_code"],
+    "result_interpretation": result.get("result_interpretation"),
+}, indent=2))
+print(json.dumps({
+    "status": final["status"],
+    "failure_kind": "android_install_signature_conflict",
+    "install_return_code": install["return_code"],
+    "cleanup_return_code": cleanup["return_code"],
+}, indent=2))
+PYINSTALLFAIL
+
+# Exercise the real worker failure callback with an APK-shaped archive whose
+# manifest is deliberately invalid. It must end in a failed report and must
+# never be represented as a successful execution.
+python - <<'PYNEG'
 import zipfile
 from pathlib import Path
 with zipfile.ZipFile("artifacts/invalid-manifest.apk", "w", zipfile.ZIP_DEFLATED) as archive:
     archive.writestr("AndroidManifest.xml", b"not a compiled Android manifest")
     archive.writestr("classes.dex", b"not dex bytecode")
-PY
+PYNEG
 curl --fail --silent --show-error \
   -F persona_id=baseline \
   -F "apk=@artifacts/invalid-manifest.apk;type=application/vnd.android.package-archive" \
   http://127.0.0.1:8000/api/v1/runs > artifacts/negative-upload-response.json
 
-python - <<'PY'
+python - <<'PYNEG'
 import json
 import time
 import urllib.request
@@ -195,12 +258,23 @@ Path("artifacts/negative-run.report.json").write_text(json.dumps({
 }, indent=2))
 print(json.dumps({"status": final["status"], "fixture_kind": "intentionally_invalid_apk_manifest",
                   "runner_return_code": result.get("runner_return_code"), "error": result.get("error")}, indent=2))
-PY
+PYNEG
 
-# The Appium journey itself establishes a cellular baseline, applies a
-# measured latency profile, issues a real HTTP request, and resets emulator
-# settings in its finally block.
+# The Appium journey runs a warm-up plus three baseline, three latency-only,
+# and three bandwidth-only HTTP transfers of a controlled payload through the
+# emulator network stack, then verifies the emulator controls reset to defaults.
+# This deterministically validates emulator shaping; it does not claim public-Internet performance.
 adb install smoke-android/app/build/outputs/apk/debug/app-debug.apk
+
+# A hosted Pixel emulator can occasionally leave a system "launcher isn't
+# responding" dialog in front of the app after cold boot. The launcher is not
+# the target under test, so dismiss that stale host-UI state and verify that
+# the fixture activity itself can be foregrounded before Appium attaches.
+adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher >/dev/null 2>&1 || true
+adb -s emulator-5554 shell input keyevent 4 >/dev/null 2>&1 || true
+adb -s emulator-5554 shell am start -W -n org.bharatsim.smokeapp/.MainActivity > artifacts/fixture-activity-preflight.log
+grep -q "Status: ok" artifacts/fixture-activity-preflight.log
+
 appium --address 127.0.0.1 --port 4723 > artifacts/appium-server.log 2>&1 &
 APPIUM_PID=$!
 python worker/tests/appium_smoke_journey.py --artifacts artifacts
