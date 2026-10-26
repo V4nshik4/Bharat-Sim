@@ -296,11 +296,11 @@ def main() -> int:
         baseline_probes, last_sequence = take_samples("baseline", last_sequence)
         evidence["baseline_probes"] = baseline_probes
 
-        # Test bandwidth immediately after baseline with a custom 5 Mbps cap.
+        # Test bandwidth immediately after baseline with a custom 8 Mbps cap.
         # The 2 MB transfer makes the expected throughput effect observable while
         # avoiding the EDGE radio preset, which stalled the HTTPS request.
         phase = "configure_bandwidth_profile"
-        bandwidth_profile = set_network_profile(None, "5000:5000")
+        bandwidth_profile = set_network_profile(None, "8000:8000")
         evidence["bandwidth_profile"] = bandwidth_profile
         phase = "bandwidth_samples"
         bandwidth_probes, last_sequence = take_samples("bandwidth-only", last_sequence)
