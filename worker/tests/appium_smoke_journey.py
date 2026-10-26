@@ -291,8 +291,8 @@ def main() -> int:
         evidence["baseline_probes"] = baseline_probes
 
         # Test bandwidth immediately after baseline to isolate whether the
-        # speed control itself affects the next real HTTP transfer. A 5 Mbps
-        # cap is below the unbounded baseline but keeps the 2 MB transfer bounded.
+        # emulator's named EDGE preset affects the next real HTTP transfer.
+        # The API 35 preset is 473.6 kbps in both directions.
         phase = "configure_bandwidth_profile"
         bandwidth_profile = set_network_profile(None, "edge")
         evidence["bandwidth_profile"] = bandwidth_profile
