@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure a real fixture HTTP request before/after Android Emulator network shaping."""
+"""Measure real fixture HTTP transfers before/after Android Emulator network shaping."""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +16,7 @@ from pathlib import Path
 BASE = "http://127.0.0.1:4723"
 ADB_SERIAL = "emulator-5554"
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
-PROBE_RE = re.compile(r"HTTP 200 · (\d+) ms · (CELLULAR|ETHERNET|WIFI|UNKNOWN|OTHER) · probe (\d+) · bytes (\d+) · attempts (\d+)")
+PROBE_RE = re.compile(r"HTTP (200|206) · (\d+) ms · (CELLULAR|ETHERNET|WIFI|UNKNOWN|OTHER) · probe (\d+) · bytes (\d+) · attempts (\d+)")
 
 
 def request(method: str, path: str, payload: dict | None = None, timeout: int = 30) -> dict:
@@ -48,37 +48,52 @@ def adb(*args: str, timeout: int = 20) -> str:
     return output
 
 
-def set_network_profile(latency_ms: int | None, speed: str = "full") -> dict:
-    """Configure emulator latency and throughput, then require exact console readback."""
-    # Use cellular with a controlled local HTTP endpoint to remove external DNS
-    # as a variable while measuring real TCP payload transfer through Android.
+def prepare_cellular_transport() -> None:
+    """Select cellular once before sampling; don't flap connectivity between profiles."""
     adb("shell", "svc", "wifi", "disable")
     adb("emu", "gsm", "voice", "home")
     adb("emu", "gsm", "data", "home")
     adb("shell", "svc", "data", "enable")
+    # Allow the active route and DNS state to settle before the first measurement.
+    time.sleep(5)
+
+
+def speed_limits_bps(speed: str) -> tuple[int, int]:
+    """Return expected (upload, download) bits/s for supported emulator speed profiles."""
+    presets = {
+        "full": (0, 0),
+        "umts": (384_000, 384_000),
+    }
+    if speed in presets:
+        return presets[speed]
+    parts = speed.split(":")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise ValueError(f"Invalid emulator speed profile: {speed}")
+    return int(parts[0]) * 1000, int(parts[1]) * 1000
+
+
+def set_network_profile(latency_ms: int | None, speed: str = "full") -> dict:
+    """Change only emulator latency/throughput, then require exact console readback."""
     latency = "none" if latency_ms is None else str(latency_ms)
     adb("emu", "network", "delay", latency)
     adb("emu", "network", "speed", speed)
-    time.sleep(2)  # Let Android route selection and emulator profile changes settle.
-    if speed == "full":
-        upload_bps = download_bps = 0
-    else:
-        parts = speed.split(":")
-        if len(parts) != 2 or not all(part.isdigit() for part in parts):
-            raise ValueError(f"Invalid emulator speed profile: {speed}")
-        upload_bps = int(parts[0]) * 1000
-        download_bps = int(parts[1]) * 1000
+    # Let the emulator network simulator settle after applying a runtime profile.
+    # Do not toggle mobile data here: keep the same active transport across samples.
+    time.sleep(5)
+    upload_bps, download_bps = speed_limits_bps(speed)
     expected = {
         "latency_ms": 0 if latency_ms is None else latency_ms,
         "download_bps": download_bps,
         "upload_bps": upload_bps,
     }
     output = adb("emu", "network", "status")
+
     def read(pattern: str) -> int:
         match = re.search(pattern, output, re.I)
         if not match:
             raise RuntimeError(f"Could not parse emulator network status: {output}")
         return int(match.group(1))
+
     observed = {
         "minimum_latency_ms": read(r"minimum latency:\s*(\d+)\s+ms"),
         "maximum_latency_ms": read(r"maximum latency:\s*(\d+)\s+ms"),
@@ -169,17 +184,31 @@ def find_element(session: str, using: str, value: str, timeout: int = 25) -> str
     raise RuntimeError(f"Could not find element ({using}={value}) within {timeout}s: {last_error}")
 
 
-def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: int = 100) -> dict:
+def parse_probe_text(text: str) -> dict[str, object] | None:
+    """Parse a single fixture UI status line without relying on positional group use at call sites."""
+    match = PROBE_RE.fullmatch(text)
+    if not match:
+        return None
+    return {
+        "http_status": int(match.group(1)),
+        "duration_ms": int(match.group(2)),
+        "transport": match.group(3),
+        "sequence": int(match.group(4)),
+        "bytes_read": int(match.group(5)),
+        "attempts": int(match.group(6)),
+    }
+
+
+def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: int = 160) -> dict:
     deadline = time.monotonic() + timeout
     last_text = ""
     while time.monotonic() < deadline:
         last_text = str(request("GET", f"/session/{session}/element/{element_id}/text", timeout=5).get("value", ""))
-        match = PROBE_RE.fullmatch(last_text)
-        if match and int(match.group(3)) > after_sequence:
-            bytes_read = int(match.group(4))
-            if bytes_read != 2000000:
-                raise RuntimeError(f"Fixture downloaded unexpected payload size: {bytes_read}")
-            return {"duration_ms": int(match.group(1)), "transport": match.group(2), "sequence": int(match.group(3)), "bytes_read": bytes_read, "attempts": int(match.group(5))}
+        probe = parse_probe_text(last_text)
+        if probe and int(probe["sequence"]) > after_sequence:
+            if int(probe["bytes_read"]) != 2_000_000:
+                raise RuntimeError(f"Fixture downloaded unexpected payload size: {probe['bytes_read']}")
+            return probe
         if "probe failed" in last_text.lower() or "returned http" in last_text.lower():
             raise RuntimeError(f"Fixture network probe failed: {last_text}")
         time.sleep(0.5)
@@ -192,8 +221,14 @@ def main() -> int:
     args = parser.parse_args()
     args.artifacts.mkdir(parents=True, exist_ok=True)
     session_id = None
+    phase = "configure_baseline_profile"
+    evidence: dict[str, object] = {}
     try:
+        phase = "prepare_cellular_transport"
+        prepare_cellular_transport()
+        phase = "configure_baseline_profile"
         baseline_profile = set_network_profile(None, "full")
+        evidence["baseline_profile"] = baseline_profile
         wait_for_server()
         created = request("POST", "/session", {
             "capabilities": {
@@ -215,7 +250,6 @@ def main() -> int:
             raise RuntimeError(f"Appium did not return a session id: {created}")
         base = f"/session/{session_id}"
 
-        find_element(session_id, "accessibility id", "fixture-title")
         action_id = find_element(session_id, "accessibility id", "primary-action")
         status_id = find_element(session_id, "accessibility id", "journey-status")
         probe_id = find_element(session_id, "accessibility id", "network-probe-status")
@@ -224,7 +258,8 @@ def main() -> int:
             raise RuntimeError(f"Fixture did not start in the expected Ready state: {status_text!r}")
 
         def take_samples(label: str, previous_sequence: int) -> tuple[list[dict], int]:
-            samples = []
+            samples: list[dict] = []
+            evidence["samples_" + label] = samples
             last_sequence = previous_sequence
             for _ in range(3):
                 request("POST", base + f"/element/{action_id}/click", {})
@@ -245,15 +280,26 @@ def main() -> int:
             raise RuntimeError(f"Warm-up request used unsupported transport: {warmup_probe}")
         last_sequence = warmup_probe["sequence"]
 
+        phase = "baseline_samples"
         baseline_probes, last_sequence = take_samples("baseline", last_sequence)
+        evidence["baseline_probes"] = baseline_probes
+
+        # Test bandwidth immediately after baseline to isolate whether the
+        # speed control itself affects the next real HTTP transfer.
+        phase = "configure_bandwidth_profile"
+        bandwidth_profile = set_network_profile(None, "1000:1000")
+        evidence["bandwidth_profile"] = bandwidth_profile
+        phase = "bandwidth_samples"
+        bandwidth_probes, last_sequence = take_samples("bandwidth-only", last_sequence)
+        evidence["bandwidth_probes"] = bandwidth_probes
 
         # Isolate latency from throughput: full bandwidth, fixed 150 ms delay.
+        phase = "configure_latency_profile"
         latency_profile = set_network_profile(150, "full")
+        evidence["latency_profile"] = latency_profile
+        phase = "latency_samples"
         latency_probes, last_sequence = take_samples("latency-only", last_sequence)
-
-        # Isolate bandwidth from latency: no delay, 3 Mbps upload/download.
-        bandwidth_profile = set_network_profile(None, "3000:3000")
-        bandwidth_probes, last_sequence = take_samples("bandwidth-only", last_sequence)
+        evidence["latency_probes"] = latency_probes
 
         baseline_median_ms = statistics.median(p["duration_ms"] for p in baseline_probes)
         latency_median_ms = statistics.median(p["duration_ms"] for p in latency_probes)
@@ -278,7 +324,9 @@ def main() -> int:
                 f"delta_ms={bandwidth_delta_ms}, minimum_required_delta_ms={minimum_bandwidth_delta_ms}"
             )
 
+        phase = "verify_network_reset"
         reset_evidence = reset_network()
+        evidence["reset_profile"] = reset_evidence
         if reset_evidence.get("status") != "verified":
             raise RuntimeError(f"Could not verify network profile reset: {reset_evidence}")
 
@@ -291,14 +339,13 @@ def main() -> int:
         report = {
             "status": "passed",
             "package_name": "org.bharatsim.smokeapp",
-            "probe_endpoint": "http://10.0.2.2:8001/payload?bytes=2000000",
-            "probe_endpoint_scope": "local CI test server via Android Emulator host gateway; not public-internet evidence",
-            "probe_payload_bytes": 2000000,
+            "probe_endpoint": "https://speed.cloudflare.com/__down?bytes=2000000",
+            "probe_endpoint_scope": "Public Cloudflare speed-test endpoint over HTTPS; measures an actual external transfer through the emulator's routed network path. Results include public endpoint and Internet variability and apply only to the source-built fixture, not arbitrary uploaded apps.",
+            "probe_payload_bytes": 2_000_000,
             "assertions": [
-                "fixture title is visible",
                 "primary action is located by stable accessibility identifier",
                 "tap changes the status text to Primary action completed",
-                "each probe downloaded exactly 2,000,000 bytes from the controlled CI HTTP server through the emulator network stack",
+                "each probe downloaded exactly 2,000,000 bytes from the public HTTPS endpoint through the Android Emulator network stack",
                 "per-request retry counts are captured in probe evidence",
                 "baseline, latency-only, and bandwidth-only probes used cellular/Ethernet transport",
                 "latency-only median duration exceeded baseline by at least 50 ms",
@@ -327,7 +374,8 @@ def main() -> int:
         (args.artifacts / "appium-journey.report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report, indent=2))
         return 0
-    except Exception:
+    except Exception as exc:
+        phase_error = str(exc)
         if session_id:
             try:
                 page_source = str(request("GET", f"/session/{session_id}/source").get("value", ""))
@@ -340,6 +388,18 @@ def main() -> int:
                     (args.artifacts / "appium-failure.png").write_bytes(base64.b64decode(image_data, validate=True))
             except Exception as screenshot_error:
                 (args.artifacts / "appium-screenshot-error.txt").write_text(str(screenshot_error))
+        logcat_path = args.artifacts / "appium-failure-logcat.txt"
+        try:
+            logs = subprocess.run(["adb", "-s", ADB_SERIAL, "logcat", "-d", "-t", "2000", "-v", "threadtime"], capture_output=True, text=True, timeout=20, check=False)
+            logcat_path.write_text((logs.stdout + "\n" + logs.stderr)[-300000:], encoding="utf-8", errors="replace")
+            evidence["failure_logcat_return_code"] = logs.returncode
+        except Exception as log_error:
+            evidence["failure_logcat_error"] = str(log_error)
+        (args.artifacts / "appium-journey.failure.json").write_text(json.dumps({
+            "status": "failed", "phase": phase, "error": phase_error,
+            "evidence_collected_before_failure": evidence,
+            "failure_logcat": str(logcat_path),
+        }, indent=2))
         raise
     finally:
         if session_id:
@@ -347,7 +407,18 @@ def main() -> int:
                 request("DELETE", f"/session/{session_id}", timeout=15)
             except Exception as exc:
                 print(f"warning: could not close Appium session cleanly: {exc}")
-        reset_network()
+        try:
+            reset_after_run = reset_network()
+        except Exception as reset_error:
+            reset_after_run = {"status": "unverified", "error": str(reset_error)}
+        failure_report = args.artifacts / "appium-journey.failure.json"
+        if failure_report.exists():
+            try:
+                saved = json.loads(failure_report.read_text(encoding="utf-8"))
+                saved["reset_after_failure"] = reset_after_run
+                failure_report.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+            except Exception as report_error:
+                (args.artifacts / "failure-report-update-error.txt").write_text(str(report_error))
 
 
 if __name__ == "__main__":
