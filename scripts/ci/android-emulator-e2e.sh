@@ -25,22 +25,10 @@ export BHARATSIM_WORKER_TOKEN="$(python -c 'import secrets; print(secrets.token_
 export BHARATSIM_DATA_DIR="$RUNNER_TEMP/bharatsim-api-data"
 
 mkdir -p artifacts
-python scripts/ci/network-probe-server.py > artifacts/network-probe-server.log 2>&1 &
-PROBE_PID=$!
-python - <<'PY'
-import time
-import urllib.request
-deadline = time.monotonic() + 20
-while time.monotonic() < deadline:
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:8001/health", timeout=2) as response:
-            if response.status == 200:
-                break
-    except Exception:
-        time.sleep(0.25)
-else:
-    raise SystemExit("Local CI network probe server did not become ready")
-PY
+
+# The Android fixture uses a real public HTTPS payload endpoint. DNS is configured
+# by the emulator workflow; a remote endpoint is required to verify the emulator's
+# actual routed traffic shaping rather than only local host-alias traffic.
 (cd backend && exec uvicorn app.main:app --host 0.0.0.0 --port 8000) > artifacts/api.log 2>&1 &
 API_PID=$!
 WORKER_PID=
@@ -53,7 +41,6 @@ cleanup() {
   adb -s emulator-5554 shell svc data enable >/dev/null 2>&1 || true
   [ -z "$APPIUM_PID" ] || kill "$APPIUM_PID" 2>/dev/null || true
   [ -z "$WORKER_PID" ] || kill "$WORKER_PID" 2>/dev/null || true
-  [ -z "$PROBE_PID" ] || kill "$PROBE_PID" 2>/dev/null || true
   [ -z "$API_PID" ] || kill "$API_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -142,22 +129,22 @@ Path("artifacts/api-run.report.json").write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
 PY
 
-# Exercise a real worker failure callback with an APK-shaped archive whose
-# manifest is deliberately invalid. This is a negative test fixture only; it
-# must produce a failed run and must never be reported as a successful test.
-python - <<'PY'
+# Exercise the real worker failure callback with an APK-shaped archive whose
+# manifest is deliberately invalid. It must end in a failed report and must
+# never be represented as a successful execution.
+python - <<'PYNEG'
 import zipfile
 from pathlib import Path
 with zipfile.ZipFile("artifacts/invalid-manifest.apk", "w", zipfile.ZIP_DEFLATED) as archive:
     archive.writestr("AndroidManifest.xml", b"not a compiled Android manifest")
     archive.writestr("classes.dex", b"not dex bytecode")
-PY
+PYNEG
 curl --fail --silent --show-error \
   -F persona_id=baseline \
   -F "apk=@artifacts/invalid-manifest.apk;type=application/vnd.android.package-archive" \
   http://127.0.0.1:8000/api/v1/runs > artifacts/negative-upload-response.json
 
-python - <<'PY'
+python - <<'PYNEG'
 import json
 import time
 import urllib.request
@@ -195,12 +182,23 @@ Path("artifacts/negative-run.report.json").write_text(json.dumps({
 }, indent=2))
 print(json.dumps({"status": final["status"], "fixture_kind": "intentionally_invalid_apk_manifest",
                   "runner_return_code": result.get("runner_return_code"), "error": result.get("error")}, indent=2))
-PY
+PYNEG
 
-# The Appium journey itself establishes a cellular baseline, applies a
-# measured latency profile, issues a real HTTP request, and resets emulator
-# settings in its finally block.
+# The Appium journey runs a warm-up plus three baseline, three latency-only,
+# and three bandwidth-only HTTP transfers of a controlled payload through the
+# emulator network stack, then verifies the emulator controls reset to defaults.
+# This deterministically validates emulator shaping; it does not claim public-Internet performance.
 adb install smoke-android/app/build/outputs/apk/debug/app-debug.apk
+
+# A hosted Pixel emulator can occasionally leave a system "launcher isn't
+# responding" dialog in front of the app after cold boot. The launcher is not
+# the target under test, so dismiss that stale host-UI state and verify that
+# the fixture activity itself can be foregrounded before Appium attaches.
+adb -s emulator-5554 shell am force-stop com.google.android.apps.nexuslauncher >/dev/null 2>&1 || true
+adb -s emulator-5554 shell input keyevent 4 >/dev/null 2>&1 || true
+adb -s emulator-5554 shell am start -W -n org.bharatsim.smokeapp/.MainActivity > artifacts/fixture-activity-preflight.log
+grep -q "Status: ok" artifacts/fixture-activity-preflight.log
+
 appium --address 127.0.0.1 --port 4723 > artifacts/appium-server.log 2>&1 &
 APPIUM_PID=$!
 python worker/tests/appium_smoke_journey.py --artifacts artifacts
