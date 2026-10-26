@@ -122,6 +122,9 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Boot disposable Android emulator and execute runner
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          BHARATSIM_PROBE_URL: https://speed.cloudflare.com/__down?bytes=2000000
+          BHARATSIM_PROBE_IP: ${{ steps.probe-address.outputs.ip }}
         with:
           api-level: 35
           target: google_apis
