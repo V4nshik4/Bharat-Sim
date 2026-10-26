@@ -298,9 +298,9 @@ def main() -> int:
 
         # Test bandwidth immediately after baseline to isolate whether the
         # emulator's named EDGE preset affects the next real HTTP transfer.
-        # The API 35 preset is 473.6 kbps in both directions.
+        # The custom profile is 5 Mbps in both directions to avoid the EDGE radio preset stalling HTTPS transfers.
         phase = "configure_bandwidth_profile"
-        bandwidth_profile = set_network_profile(None, "edge")
+        bandwidth_profile = set_network_profile(None, "5000:5000")
         evidence["bandwidth_profile"] = bandwidth_profile
         phase = "bandwidth_samples"
         bandwidth_probes, last_sequence = take_samples("bandwidth-only", last_sequence)
