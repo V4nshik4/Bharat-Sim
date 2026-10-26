@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 BASE = "http://127.0.0.1:4723"
 ADB_SERIAL = "emulator-5554"
@@ -351,10 +352,15 @@ def main() -> int:
         probe_lines = [line for line in logcat.stdout.splitlines() if "BHARATSIM_NETWORK_PROBE" in line]
         if not probe_lines:
             raise RuntimeError("No real network-probe markers were found in emulator logcat")
-        observed_ips = set(re.findall(r"endpoint_ip=([0-9.]+)", "\n".join(probe_lines)))
+        probe_log_text = "\n".join(probe_lines)
+        observed_ips = set(re.findall(r"endpoint_ip=([0-9.]+)", probe_log_text))
+        observed_hosts = set(re.findall(r"endpoint_host=([A-Za-z0-9.-]+)", probe_log_text))
         expected_ip = os.getenv("BHARATSIM_PROBE_IP", "")
+        expected_host = urlsplit(os.getenv("BHARATSIM_PROBE_URL", "")).hostname or ""
         if not expected_ip or observed_ips != {expected_ip}:
             raise RuntimeError(f"Probe endpoint IP evidence mismatch: expected={expected_ip!r}, observed={sorted(observed_ips)}")
+        if not expected_host or observed_hosts != {expected_host}:
+            raise RuntimeError(f"Probe endpoint host evidence mismatch: expected={expected_host!r}, observed={sorted(observed_hosts)}")
         probe_logcat_path = args.artifacts / "appium-network-probe.logcat.txt"
         probe_logcat_path.write_text("\n".join(probe_lines) + "\n", encoding="utf-8")
 
