@@ -273,8 +273,8 @@ def main() -> int:
                 if status != "Primary action completed":
                     raise RuntimeError(f"Primary action state assertion failed during {label}: {status!r}")
                 probe = wait_for_probe(session_id, probe_id, after_sequence=last_sequence)
-                if probe["transport"] in ("UNKNOWN", "OTHER"):
-                    raise RuntimeError(f"{label} request used unsupported/unidentified transport: {probe}")
+                if probe["transport"] != "CELLULAR":
+                    raise RuntimeError(f"{label} request did not use the required simulated cellular transport: {probe}")
                 if expected_transport is not None and probe["transport"] != expected_transport:
                     raise RuntimeError(
                         f"{label} request changed transport from {expected_transport} to {probe['transport']}: {probe}"
@@ -286,8 +286,8 @@ def main() -> int:
         # Exclude one cold-start download from all timing comparisons.
         request("POST", base + f"/element/{action_id}/click", {})
         warmup_probe = wait_for_probe(session_id, probe_id, after_sequence=0)
-        if warmup_probe["transport"] in ("UNKNOWN", "OTHER"):
-            raise RuntimeError(f"Warm-up request used unsupported/unidentified transport: {warmup_probe}")
+        if warmup_probe["transport"] != "CELLULAR":
+            raise RuntimeError(f"Warm-up request did not use the required simulated cellular transport: {warmup_probe}")
         expected_transport = str(warmup_probe["transport"])
         evidence["observed_transport"] = expected_transport
         last_sequence = warmup_probe["sequence"]
