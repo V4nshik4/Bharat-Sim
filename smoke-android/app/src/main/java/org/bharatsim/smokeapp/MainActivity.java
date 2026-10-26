@@ -13,14 +13,23 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Button;
 
-import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 import java.io.IOException;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLPeerUnverifiedException;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "BharatSimNetworkProbe";
@@ -86,60 +95,19 @@ public final class MainActivity extends Activity {
         String transport = activeTransport();
         for (int attempt = 1; attempt <= 4; attempt++) {
             long started = SystemClock.elapsedRealtime();
-            int statusCode = -1;
-            int bytesRead = 0;
-            HttpURLConnection connection = null;
             try {
-                URL probeUrl = new URL(PROBE_URL);
-                connection = (HttpURLConnection) probeUrl.openConnection();
-                if (!(connection instanceof HttpsURLConnection) || BuildConfig.PROBE_IP.equals("0.0.0.0")) {
-                    throw new IOException("HTTPS probe URL and pinned IPv4 address are required");
-                }
-                HttpsURLConnection https = (HttpsURLConnection) connection;
-                https.setSSLSocketFactory(new PinnedProbeSocketFactory(BuildConfig.PROBE_IP, probeUrl.getHost()));
-                https.setHostnameVerifier(HttpsURLConnection.getDefaultHostnameVerifier());
-                connection.setConnectTimeout(5000);
-                connection.setReadTimeout(30000);
-                connection.setRequestMethod("GET");
-                connection.setRequestProperty("Connection", "close");
-                connection.setRequestProperty("Accept-Encoding", "identity");
-                connection.setRequestProperty("Cache-Control", "no-cache");
-                connection.setRequestProperty("Range", "bytes=0-" + (PROBE_BYTES - 1));
-                connection.setUseCaches(false);
-                statusCode = connection.getResponseCode();
-                if (statusCode != 200 && statusCode != 206) {
-                    throw new java.io.IOException("Unexpected HTTP status " + statusCode);
-                }
-                // Read exactly the requested bounded payload. Do not wait for
-                // server EOF after the byte count is satisfied: a CDN or proxy
-                // may keep the connection alive after delivering the requested bytes.
-                try (java.io.InputStream input = connection.getInputStream()) {
-                    byte[] buffer = new byte[8192];
-                    while (bytesRead < PROBE_BYTES) {
-                        int wanted = Math.min(buffer.length, PROBE_BYTES - bytesRead);
-                        int count = input.read(buffer, 0, wanted);
-                        if (count == -1) break;
-                        bytesRead += count;
-                    }
-                }
-                if (bytesRead != PROBE_BYTES) {
-                    throw new IllegalStateException("Expected " + PROBE_BYTES + " probe bytes, received " + bytesRead);
-                }
+                ProbeResult result = performPinnedHttpsProbe(PROBE_URL, BuildConfig.PROBE_IP, PROBE_BYTES);
                 long duration = SystemClock.elapsedRealtime() - started;
-                Log.i(TAG, "BHARATSIM_NETWORK_PROBE status=HTTP_" + statusCode + " duration_ms=" + duration
+                Log.i(TAG, "BHARATSIM_NETWORK_PROBE status=HTTP_" + result.statusCode + " duration_ms=" + duration
                         + " transport=" + transport + " probe=" + sequence
-                        + " bytes_read=" + bytesRead + " attempts=" + attempt
-                        + " endpoint_host=" + probeUrl.getHost() + " endpoint_ip=" + BuildConfig.PROBE_IP);
-                final String message = "HTTP " + statusCode + " · " + duration + " ms · " + transport
-                        + " · probe " + sequence + " · bytes " + bytesRead + " · attempts " + attempt;
+                        + " bytes_read=" + result.bytesRead + " attempts=" + attempt
+                        + " endpoint_host=speed.cloudflare.com endpoint_ip=" + BuildConfig.PROBE_IP);
+                final String message = "HTTP " + result.statusCode + " · " + duration + " ms · " + transport
+                        + " · probe " + sequence + " · bytes " + result.bytesRead + " · attempts " + attempt;
                 runOnUiThread(() -> target.setText(message));
                 return;
             } catch (Exception exception) {
-                // Transient host/emulator connection resets can occur in hosted CI. Retry
-                // bounded I/O failures with backoff; keep attempt counts in logcat
-                // and UI evidence. Malformed payloads are not retried, and a final
-                // failure is never reported as a successful measurement.
-                if (exception instanceof java.io.IOException && attempt < 4) {
+                if (exception instanceof IOException && attempt < 4) {
                     Log.w(TAG, "BHARATSIM_NETWORK_PROBE retrying sequence=" + sequence
                             + " attempt=" + attempt + " after=" + exception.getClass().getSimpleName(), exception);
                     try {
@@ -157,72 +125,157 @@ public final class MainActivity extends Activity {
                 final String message = "Network probe failed: " + exception.getClass().getSimpleName();
                 runOnUiThread(() -> target.setText(message));
                 return;
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
             }
         }
     }
 
-
-    /**
-     * Resolve the HTTPS endpoint on the CI host, then connect to that IP from the
-     * emulator while retaining the URL hostname for TLS SNI and certificate checks.
-     * This avoids depending on DNS inside a constrained emulator without disabling
-     * TLS hostname verification or substituting a synthetic/local response.
-     */
-    private static final class PinnedProbeSocketFactory extends SSLSocketFactory {
-        private final SSLSocketFactory delegate = (SSLSocketFactory) SSLSocketFactory.getDefault();
-        private final String pinnedIp;
-        private final String expectedHost;
-
-        PinnedProbeSocketFactory(String pinnedIp, String expectedHost) {
-            this.pinnedIp = pinnedIp;
-            this.expectedHost = expectedHost;
+    private static ProbeResult performPinnedHttpsProbe(String urlText, String pinnedIp, int expectedBytes) throws IOException {
+        URL url = new URL(urlText);
+        if (!"https".equalsIgnoreCase(url.getProtocol()) || pinnedIp.equals("0.0.0.0")) {
+            throw new IOException("HTTPS probe URL and pinned IPv4 address are required");
         }
+        String host = url.getHost();
+        int port = url.getPort() > 0 ? url.getPort() : 443;
+        String requestPath = url.getFile().isEmpty() ? "/" : url.getFile();
 
-        @Override public Socket createSocket(String host, int port) throws IOException {
-            Socket raw = new Socket();
+        // Connect to the CI-resolved numeric IP directly. Layer TLS using the
+        // hostname so SNI and the normal certificate hostname verifier remain active.
+        try (Socket raw = new Socket()) {
             raw.connect(new InetSocketAddress(InetAddress.getByName(pinnedIp), port), 5000);
-            return delegate.createSocket(raw, expectedHost, port, true);
-        }
+            try (SSLSocket tls = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault())
+                    .createSocket(raw, host, port, true)) {
+                tls.setSoTimeout(30000);
+                tls.startHandshake();
+                if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(host, tls.getSession())) {
+                    throw new SSLPeerUnverifiedException("TLS certificate does not match " + host);
+                }
 
-        @Override public Socket createSocket(Socket socket, String host, int port, boolean autoClose) throws IOException {
-            return delegate.createSocket(socket, expectedHost, port, autoClose);
-        }
+                OutputStream output = tls.getOutputStream();
+                String request = "GET " + requestPath + " HTTP/1.1\\r\\n"
+                        + "Host: " + host + "\\r\\n"
+                        + "Connection: close\\r\\n"
+                        + "Accept-Encoding: identity\\r\\n"
+                        + "Cache-Control: no-cache\\r\\n"
+                        + "Range: bytes=0-" + (expectedBytes - 1) + "\\r\\n\\r\\n";
+                output.write(request.getBytes(StandardCharsets.US_ASCII));
+                output.flush();
 
-        @Override public Socket createSocket() throws IOException { return new PinnedAddressSocket(pinnedIp); }
-        @Override public Socket createSocket(String host, int port, InetAddress local, int localPort) throws IOException {
-            return delegate.createSocket(host, port, local, localPort);
+                InputStream input = tls.getInputStream();
+                String statusLine = readHttpLine(input);
+                String[] statusParts = statusLine.split(" ", 3);
+                if (statusParts.length < 2 || !statusParts[0].startsWith("HTTP/")) {
+                    throw new IOException("Malformed HTTP status line: " + statusLine);
+                }
+                final int statusCode;
+                try {
+                    statusCode = Integer.parseInt(statusParts[1]);
+                } catch (NumberFormatException badStatus) {
+                    throw new IOException("Malformed HTTP status code: " + statusLine, badStatus);
+                }
+                if (statusCode != 200 && statusCode != 206) {
+                    throw new IOException("Unexpected HTTP status " + statusCode);
+                }
+
+                Map<String, String> headers = new HashMap<>();
+                String headerLine;
+                while (!(headerLine = readHttpLine(input)).isEmpty()) {
+                    int colon = headerLine.indexOf(':');
+                    if (colon > 0) {
+                        headers.put(headerLine.substring(0, colon).trim().toLowerCase(Locale.ROOT),
+                                headerLine.substring(colon + 1).trim());
+                    }
+                }
+                String transferEncoding = headers.getOrDefault("transfer-encoding", "").toLowerCase(Locale.ROOT);
+                String contentLength = headers.get("content-length");
+                if (!transferEncoding.contains("chunked") && contentLength != null) {
+                    try {
+                        if (Long.parseLong(contentLength) < expectedBytes) {
+                            throw new IOException("HTTPS endpoint advertised fewer bytes than requested");
+                        }
+                    } catch (NumberFormatException badLength) {
+                        throw new IOException("Malformed Content-Length header", badLength);
+                    }
+                }
+                int bytesRead = transferEncoding.contains("chunked")
+                        ? readChunkedBody(input, expectedBytes)
+                        : readFixedBody(input, expectedBytes);
+                if (bytesRead != expectedBytes) {
+                    throw new IOException("Expected " + expectedBytes + " probe bytes, received " + bytesRead);
+                }
+                return new ProbeResult(statusCode, bytesRead);
+            }
         }
-        @Override public Socket createSocket(InetAddress host, int port) throws IOException {
-            return delegate.createSocket(host, port);
-        }
-        @Override public Socket createSocket(InetAddress host, int port, InetAddress local, int localPort) throws IOException {
-            return delegate.createSocket(host, port, local, localPort);
-        }
-        @Override public String[] getDefaultCipherSuites() { return delegate.getDefaultCipherSuites(); }
-        @Override public String[] getSupportedCipherSuites() { return delegate.getSupportedCipherSuites(); }
     }
 
-    private static final class PinnedAddressSocket extends Socket {
-        private final String pinnedIp;
-
-        PinnedAddressSocket(String pinnedIp) {
-            this.pinnedIp = pinnedIp;
+    private static int readFixedBody(InputStream input, int expectedBytes) throws IOException {
+        byte[] buffer = new byte[8192];
+        int total = 0;
+        while (total < expectedBytes) {
+            int count = input.read(buffer, 0, Math.min(buffer.length, expectedBytes - total));
+            if (count < 0) break;
+            total += count;
         }
+        return total;
+    }
 
-        @Override public void connect(java.net.SocketAddress endpoint, int timeout) throws IOException {
-            if (!(endpoint instanceof InetSocketAddress)) {
-                throw new IOException("Pinned HTTPS probe requires an internet socket address");
+    private static int readChunkedBody(InputStream input, int expectedBytes) throws IOException {
+        int total = 0;
+        byte[] buffer = new byte[8192];
+        while (total < expectedBytes) {
+            String sizeLine = readHttpLine(input);
+            int semicolon = sizeLine.indexOf(';');
+            String sizeText = (semicolon >= 0 ? sizeLine.substring(0, semicolon) : sizeLine).trim();
+            final int chunkSize;
+            try {
+                chunkSize = Integer.parseInt(sizeText, 16);
+            } catch (NumberFormatException badChunk) {
+                throw new IOException("Malformed HTTP chunk size: " + sizeLine, badChunk);
             }
-            int port = ((InetSocketAddress) endpoint).getPort();
-            super.connect(new InetSocketAddress(InetAddress.getByName(pinnedIp), port), timeout);
+            if (chunkSize == 0) {
+                while (!readHttpLine(input).isEmpty()) { /* consume trailers */ }
+                break;
+            }
+            int remaining = Math.min(chunkSize, expectedBytes - total);
+            int chunkRead = 0;
+            while (chunkRead < remaining) {
+                int count = input.read(buffer, 0, Math.min(buffer.length, remaining - chunkRead));
+                if (count < 0) return total + chunkRead;
+                chunkRead += count;
+            }
+            total += chunkRead;
+            if (chunkRead < chunkSize || total == expectedBytes) break;
+            if (!readHttpLine(input).isEmpty()) {
+                throw new IOException("Malformed HTTP chunk terminator");
+            }
         }
+        return total;
+    }
 
-        @Override public void connect(java.net.SocketAddress endpoint) throws IOException {
-            connect(endpoint, 0);
+    private static String readHttpLine(InputStream input) throws IOException {
+        ByteArrayOutputStream line = new ByteArrayOutputStream();
+        int previous = -1;
+        while (true) {
+            int current = input.read();
+            if (current < 0) {
+                if (line.size() == 0) return "";
+                throw new EOFException("Unexpected EOF inside HTTP headers");
+            }
+            if (previous == '\\r' && current == '\\n') {
+                byte[] bytes = line.toByteArray();
+                return new String(bytes, 0, Math.max(0, bytes.length - 1), StandardCharsets.US_ASCII);
+            }
+            line.write(current);
+            previous = current;
+        }
+    }
+
+    private static final class ProbeResult {
+        final int statusCode;
+        final int bytesRead;
+
+        ProbeResult(int statusCode, int bytesRead) {
+            this.statusCode = statusCode;
+            this.bytesRead = bytesRead;
         }
     }
 
