@@ -22,6 +22,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from worker.condition_applicator import reset_target_safely
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "worker" / "runner.py"
 MAX_RESPONSE_BYTES = 300_000
@@ -154,7 +156,9 @@ def annotate_execution_scope(report: dict[str, Any], job: dict[str, Any]) -> Non
         if network_profile.get("traffic_path_verified") is True:
             probe = network_profile.get("traffic_probe", {})
             report["constraint_verification"] = (
-                "fixture_network_path_verified; packet loss and resource constraints remain unsupported"
+                "fixture_network_path_verified; arbitrary app traffic path is unverified, "
+                "packet loss and CPU throttling remain unsupported, RAM is report-only, "
+                "and battery saver and bounded storage pressure are verified only when applied"
             )
             report["result_interpretation"] = (
                 "The source-built fixture received HTTP 200 over the reported emulator Ethernet/cellular "
@@ -163,12 +167,14 @@ def annotate_execution_scope(report: dict[str, Any], job: dict[str, Any]) -> Non
             )
         else:
             report["constraint_verification"] = (
-                "partial_network_control_verified; active app traffic path, packet loss when requested, "
-                "CPU, RAM, storage, and battery-saver constraints are not verified"
+                "partial_network_control_verified; active app traffic path remains unverified, "
+                "packet loss and CPU throttling remain unsupported, RAM is report-only, "
+                "and battery saver and bounded storage pressure are verified only when applied"
             )
             report["result_interpretation"] = (
                 "Smoke procedure completed; emulator network delay/bandwidth controls were read back, "
-                "but active app traffic routing and overall app health are not proven."
+                "battery saver and bounded storage pressure are verified only when applied, "
+                "and active app traffic routing and overall app health are not proven."
             )
     else:
         report["network_constraints_applied"] = False
@@ -242,6 +248,10 @@ def run_job(base_url: str, token: str, serial: str, job: dict[str, Any], duratio
             ]
             profile = job.get("persona_profile")
             if isinstance(profile, dict):
+                profile_path = work / "persona_profile.json"
+                profile_path.write_text(json.dumps(profile), encoding="utf-8")
+                runner_command.extend(["--persona-profile", str(profile_path)])
+
                 required_profile_values = ("latency_ms", "down_kbps", "up_kbps")
                 if all(isinstance(profile.get(key), (int, float)) for key in required_profile_values):
                     runner_command.extend([
@@ -250,9 +260,15 @@ def run_job(base_url: str, token: str, serial: str, job: dict[str, Any], duratio
                         "--network-up-kbps", str(int(profile["up_kbps"])),
                         "--network-loss-pct", str(float(profile.get("packet_loss_pct", 0))),
                     ])
-            completed = subprocess.run(
-                runner_command, env=env, capture_output=True, text=True, timeout=360, check=False,
-            )
+            try:
+                completed = subprocess.run(
+                    runner_command, env=env, capture_output=True, text=True, timeout=360, check=False,
+                )
+            except subprocess.TimeoutExpired as timeout_exc:
+                print(f"runner timed out after 360s for run {run_id}; invoking safe cleanup fallback", file=sys.stderr, flush=True)
+                reset_target_safely(serial)
+                raise WorkerError("Android smoke runner timed out after 360 seconds") from timeout_exc
+
             reports = list(artifact_dir.glob("*.report.json"))
             if reports:
                 report = json.loads(reports[0].read_text(encoding="utf-8"))
@@ -285,6 +301,10 @@ def run_job(base_url: str, token: str, serial: str, job: dict[str, Any], duratio
             }, timeout=30)
             print(json.dumps({"run_id": run_id, "status": final_status, "apk_sha256": job.get("apk_sha256")}), flush=True)
     except Exception as exc:
+        try:
+            reset_target_safely(serial)
+        except Exception as reset_exc:
+            print(f"cleanup fallback error for {run_id}: {reset_exc}", file=sys.stderr, flush=True)
         # A failed report submission is intentionally not disguised as a successful run.
         try:
             request_json(base_url, token, str(job["result_url"]), {

@@ -13,3 +13,14 @@ backend/data/
 *.sqlite3
 *.db
 .DS_Store
+
+.claude/
+.gemini/
+.jolli/
+
+smoke-android/.gradle/
+smoke-android/build/
+
+.pytest_tmp/
+.tmp_pytest/
+*.tsbuildinfo

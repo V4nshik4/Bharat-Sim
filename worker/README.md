@@ -51,6 +51,26 @@ An expired lease can be retried up to three claims. A stale or duplicate result 
 
 ## Runner output and limitations
 
-A completed smoke run means install/launch/observation/log collection completed without a detected fatal crash marker; it does not mean the application passed every user journey. A fatal crash marker during the observation window fails the smoke run. Absence of a marker does not prove the app is healthy. The worker applies Android Emulator console latency and upload/download bandwidth settings when the leased persona profile is available and the target serial is an emulator. It reads back the emulator's reported delay/speed and restores defaults after the run. This is control-plane verification only: the runner does not yet prove the app's active network path used those controls. Packet loss, app-specific journey automation in the worker, CPU/RAM/storage pressure, and battery-saver enforcement remain unsupported.
+A completed smoke run means install/launch/observation/log collection completed without a detected fatal crash marker; it does not mean the application passed every user journey. A fatal crash marker during the observation window fails the smoke run. Absence of a marker does not prove the app is healthy.
+
+### Persona condition simulation support matrix
+
+- **SUPPORTED** (on disposable Android Emulator targets with readback verification and guaranteed cleanup):
+  - **Network latency**: Configured via emulator console `emu network delay <ms>` and verified with status readback.
+  - **Download bandwidth**: Configured via emulator console `emu network speed <up>:<down>` and verified with status readback.
+  - **Battery saver**: Configured via `cmd battery unplug` and `settings put global low_power 1`, verified via `settings get global low_power` and `dumpsys battery`, reset via `cmd battery reset` and `settings put global low_power 0`.
+  - **Storage pressure**: Configured via bounded temporary file allocation (`/data/local/tmp/bharatsim_storage_pressure.tmp`), strict safety reserve check (minimum 100 MB preserved, max allocation capped), verified before and after, with guaranteed deletion and readback verification upon cleanup.
+
+- **CONTROL-PLANE VERIFIED (DATA-PLANE UNVERIFIED)**:
+  - **Upload bandwidth**: Upload bandwidth limit is applied and read back on the emulator control plane, but active application data-plane throughput is unverified without a dedicated traffic probe.
+
+- **REPORT-ONLY**:
+  - **RAM constraint**: Dynamic RAM throttling is not supported on the Android runtime without VM re-launch. The worker reads `/proc/meminfo` (MemTotal, MemAvailable) and reports actual device memory against persona targets for honest comparison.
+
+- **UNSUPPORTED**:
+  - **Packet loss**: The Android emulator console does not support packet loss simulation.
+  - **CPU constraint**: Personas do not specify CPU constraints, and arbitrary emulator CPU throttling is not supported.
+
+> **Important**: Emulator control-plane verification does not automatically prove arbitrary application data-plane traffic traversed the shaped network. Active app traffic verification requires baseline-versus-shaped comparison.
 
 The guarded network shaper is documented in NETWORK_SHAPING.md. It must only be used with a dedicated test interface, and applying a qdisc does not prove emulator traffic traversed it.

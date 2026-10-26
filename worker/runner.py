@@ -19,13 +19,21 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from worker.condition_planner import plan_conditions
+from worker.condition_applicator import ConditionManager
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def run_cmd(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+    resolved_args = list(args)
+    if resolved_args and resolved_args[0] == "adb" and not shutil.which("adb"):
+        sdk_adb = os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe")
+        if os.path.isfile(sdk_adb):
+            resolved_args[0] = sdk_adb
+    return subprocess.run(resolved_args, capture_output=True, text=True, timeout=timeout, check=False)
 
 
 def run_adb_with_retry(
@@ -213,6 +221,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("apk", type=Path)
     parser.add_argument("--duration", type=int, default=20, help="seconds to observe the launched app (1–120)")
+    parser.add_argument("--persona-profile", type=Path, help="path to JSON file containing full persona profile definition")
     parser.add_argument("--network-latency-ms", type=int)
     parser.add_argument("--network-down-kbps", type=int)
     parser.add_argument("--network-up-kbps", type=int)
@@ -238,6 +247,27 @@ def main() -> int:
         parser.error("--network-up-kbps must be between 1 and 1000000")
     if not 0 <= args.network_loss_pct <= 100:
         parser.error("--network-loss-pct must be between 0 and 100")
+
+    persona_profile: dict[str, Any] = {}
+    if args.persona_profile is not None:
+        profile_path = args.persona_profile.resolve()
+        if not profile_path.is_file():
+            parser.error(f"--persona-profile file not found: {args.persona_profile}")
+        try:
+            loaded = json.loads(profile_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                parser.error("--persona-profile JSON must be an object")
+            persona_profile = loaded
+        except json.JSONDecodeError:
+            parser.error("--persona-profile contains invalid JSON")
+    elif args.network_latency_ms is not None:
+        persona_profile = {
+            "latency_ms": args.network_latency_ms,
+            "down_kbps": args.network_down_kbps,
+            "up_kbps": args.network_up_kbps,
+            "packet_loss_pct": args.network_loss_pct,
+        }
+
     apk = args.apk.resolve()
     if not apk.is_file() or apk.suffix.lower() != ".apk":
         parser.error("APK path must be an existing .apk file")
@@ -273,6 +303,16 @@ def main() -> int:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             hasher.update(chunk)
     digest = hasher.hexdigest()
+
+    condition_plan = plan_conditions(persona_profile, serial)
+    condition_manager = ConditionManager(
+        serial,
+        condition_plan,
+        run_cmd_fn=run_cmd,
+        apply_network_fn=apply_emulator_network_profile,
+        reset_network_fn=reset_emulator_network_profile,
+    )
+
     report: dict[str, object] = {
         "schema_version": "1.0",
         "started_at": started,
@@ -281,12 +321,13 @@ def main() -> int:
         "device_serial": serial,
         "status": "failed",
         "network_profile": None,
+        "condition_evidence": None,
         "constraints_applied": False,
         "constraint_verification": "unsupported_not_applied",
         "steps": [],
         "limitations": [
             "Smoke test only; no app-specific interaction flow is automated.",
-            "Latency and bandwidth controls are applied only to Android Emulator targets and only control-plane readback is verified here; packet loss and CPU/RAM/storage pressure are unsupported.",
+            "Latency and bandwidth controls, battery saver, and bounded storage pressure are applied only to Android Emulator targets with readback and cleanup verification; packet loss and CPU throttling are unsupported, RAM restriction is report-only, and active app data-plane traffic is unverified.",
             "A single smoke run does not prove app traffic traversed the configured network profile; use the repeated baseline-versus-shaped fixture experiment for that separate claim.",
             "A missing crash marker does not prove the app is healthy.",
         ],
@@ -319,99 +360,108 @@ def main() -> int:
             raise RuntimeError("APK contains an invalid Android package name")
         report["package_name"] = package_name
 
-        if args.network_latency_ms is not None:
-            report["network_profile"] = apply_emulator_network_profile(
-                serial, args.network_latency_ms, args.network_down_kbps,
-                args.network_up_kbps, args.network_loss_pct
-            )
-            if report["network_profile"].get("network_constraints_applied"):
+        with condition_manager:
+            report["network_profile"] = condition_manager.network_profile_evidence
+            if report.get("network_profile") and report["network_profile"].get("network_constraints_applied"):
                 report["constraint_verification"] = (
                     "partial_network_control_verified; active app traffic path and resource constraints unverified"
                 )
 
+            t = time.monotonic()
+            clear = run_cmd(["adb", "-s", serial, "logcat", "-c"], timeout=10)
+            record("clear_logcat", clear, time.monotonic() - t)
+            if clear.returncode != 0:
+                raise RuntimeError("could not clear logcat before run")
 
-        t = time.monotonic()
-        clear = run_cmd(["adb", "-s", serial, "logcat", "-c"], timeout=10)
-        record("clear_logcat", clear, time.monotonic() - t)
-        if clear.returncode != 0:
-            raise RuntimeError("could not clear logcat before run")
+            t = time.monotonic()
+            install = run_cmd(["adb", "-s", serial, "install", "-r", str(apk)], timeout=90)
+            record("install_apk", install, time.monotonic() - t)
+            if install.returncode != 0 or "Success" not in install.stdout:
+                raise RuntimeError("APK installation failed")
 
-        t = time.monotonic()
-        install = run_cmd(["adb", "-s", serial, "install", "-r", str(apk)], timeout=90)
-        record("install_apk", install, time.monotonic() - t)
-        if install.returncode != 0 or "Success" not in install.stdout:
-            raise RuntimeError("APK installation failed")
+            t = time.monotonic()
+            launch = run_cmd(["adb", "-s", serial, "shell", "monkey", "-p", package_name, "-c", "android.intent.category.LAUNCHER", "1"], timeout=20)
+            record("launch_app", launch, time.monotonic() - t)
+            if launch.returncode != 0 or "No activities found" in launch.stdout + launch.stderr:
+                raise RuntimeError("could not launch app using launcher intent")
 
-        t = time.monotonic()
-        launch = run_cmd(["adb", "-s", serial, "shell", "monkey", "-p", package_name, "-c", "android.intent.category.LAUNCHER", "1"], timeout=20)
-        record("launch_app", launch, time.monotonic() - t)
-        if launch.returncode != 0 or "No activities found" in launch.stdout + launch.stderr:
-            raise RuntimeError("could not launch app using launcher intent")
-
-        time.sleep(args.duration)
-        t = time.monotonic()
-        logs = run_adb_with_retry(serial, ["logcat", "-d", "-t", "5000", "-v", "threadtime"], timeout=30)
-        record("collect_logcat", logs, time.monotonic() - t)
-        if logs.returncode != 0:
-            raise RuntimeError("logcat collection failed")
-        args.out.mkdir(parents=True, exist_ok=True)
-        stem = digest[:12]
-        log_path = args.out / (stem + ".logcat.txt")
-        log_path.write_text(logs.stdout, encoding="utf-8", errors="replace")
-        report["logcat_artifact"] = str(log_path)
-        report["logcat_bytes"] = len(logs.stdout.encode("utf-8", errors="replace"))
-        report["fatal_exception_marker"] = bool(re.search(r"FATAL EXCEPTION|Fatal signal|SIGSEGV", logs.stdout, re.I))
-        log_signals = extract_logcat_signals(logs.stdout)
-        report["log_signals"] = log_signals
-        report["log_signals_may_be_truncated"] = len(log_signals) >= 20
-        report["anr_marker"] = any(item["category"] == "anr" for item in log_signals)
-        report["oom_marker"] = any(item["category"] == "oom" for item in log_signals)
-        report["network_failure_marker"] = any(item["category"] == "network" for item in log_signals)
-        report["storage_failure_marker"] = any(item["category"] == "storage" for item in log_signals)
-        network_probe_logs = run_cmd(
-            ["adb", "-s", serial, "logcat", "-d", "-s", "BharatSimNetworkProbe:I", "*:S"],
-            timeout=15,
-        )
-        network_probe = parse_fixture_network_probe(network_probe_logs.stdout + "\n" + network_probe_logs.stderr)
-        if isinstance(report.get("network_profile"), dict):
-            report["network_profile"]["traffic_probe_log_return_code"] = network_probe_logs.returncode
-            report["network_profile"]["traffic_probe"] = network_probe
-            # A single absolute duration cannot establish causality: an unshaped
-            # request can be slow for unrelated reasons. Only the dedicated
-            # baseline-versus-shaped Appium experiment may mark the fixture path
-            # verified after comparing repeated real requests under controlled
-            # profiles. Keep this worker report explicitly partial.
-            report["network_profile"]["traffic_path_verified"] = False
-            report["network_profile"]["traffic_path_verification"] = (
-                "unverified_single_sample_requires_baseline_comparison"
+            time.sleep(args.duration)
+            t = time.monotonic()
+            logs = run_adb_with_retry(serial, ["logcat", "-d", "-t", "5000", "-v", "threadtime"], timeout=30)
+            record("collect_logcat", logs, time.monotonic() - t)
+            if logs.returncode != 0:
+                raise RuntimeError("logcat collection failed")
+            args.out.mkdir(parents=True, exist_ok=True)
+            stem = digest[:12]
+            log_path = args.out / (stem + ".logcat.txt")
+            log_path.write_text(logs.stdout, encoding="utf-8", errors="replace")
+            report["logcat_artifact"] = str(log_path)
+            report["logcat_bytes"] = len(logs.stdout.encode("utf-8", errors="replace"))
+            report["fatal_exception_marker"] = bool(re.search(r"FATAL EXCEPTION|Fatal signal|SIGSEGV", logs.stdout, re.I))
+            log_signals = extract_logcat_signals(logs.stdout)
+            report["log_signals"] = log_signals
+            report["log_signals_may_be_truncated"] = len(log_signals) >= 20
+            report["anr_marker"] = any(item["category"] == "anr" for item in log_signals)
+            report["oom_marker"] = any(item["category"] == "oom" for item in log_signals)
+            report["network_failure_marker"] = any(item["category"] == "network" for item in log_signals)
+            report["storage_failure_marker"] = any(item["category"] == "storage" for item in log_signals)
+            network_probe_logs = run_cmd(
+                ["adb", "-s", serial, "logcat", "-d", "-s", "BharatSimNetworkProbe:I", "*:S"],
+                timeout=15,
             )
-        if report["fatal_exception_marker"]:
-            report["status"] = "failed"
-            report["error"] = "Fatal crash marker observed during the smoke-test observation window"
-        else:
-            report["status"] = "completed"
+            network_probe = parse_fixture_network_probe(network_probe_logs.stdout + "\n" + network_probe_logs.stderr)
+            if isinstance(report.get("network_profile"), dict):
+                report["network_profile"]["traffic_probe_log_return_code"] = network_probe_logs.returncode
+                report["network_profile"]["traffic_probe"] = network_probe
+                # A single absolute duration cannot establish causality: an unshaped
+                # request can be slow for unrelated reasons. Only the dedicated
+                # baseline-versus-shaped Appium experiment may mark the fixture path
+                # verified after comparing repeated real requests under controlled
+                # profiles. Keep this worker report explicitly partial.
+                report["network_profile"]["traffic_path_verified"] = False
+                report["network_profile"]["traffic_path_verification"] = (
+                    "unverified_single_sample_requires_baseline_comparison"
+                )
+            if report["fatal_exception_marker"]:
+                report["status"] = "failed"
+                report["error"] = "Fatal crash marker observed during the smoke-test observation window"
+            else:
+                report["status"] = "completed"
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
         report["error"] = str(exc)
-    # Always attempt to remove the test package from a reusable disposable
-    # emulator. This is cleanup, not a substitute for reverting a VM snapshot.
-    if report.get("package_name"):
-        t = time.monotonic()
-        uninstall = run_adb_with_retry(serial, ["uninstall", str(report["package_name"])], timeout=30)
-        record("cleanup_uninstall", uninstall, time.monotonic() - t)
-        if uninstall.returncode != 0 and "Unknown package" not in (uninstall.stdout + uninstall.stderr):
-            report["cleanup_warning"] = "Could not uninstall the test package; reset or discard this emulator before another job."
-            if report["status"] == "completed":
-                report["status"] = "failed"
-                report["error"] = report["cleanup_warning"]
-    if args.network_latency_ms is not None and re.fullmatch(r"emulator-\d+", serial):
-        reset_evidence = reset_emulator_network_profile(serial)
+    finally:
+        # Always attempt to remove the test package from a reusable disposable
+        # emulator. This is cleanup, not a substitute for reverting a VM snapshot.
+        if report.get("package_name"):
+            t = time.monotonic()
+            uninstall = run_adb_with_retry(serial, ["uninstall", str(report["package_name"])], timeout=30)
+            record("cleanup_uninstall", uninstall, time.monotonic() - t)
+            if uninstall.returncode != 0 and "Unknown package" not in (uninstall.stdout + uninstall.stderr):
+                report["cleanup_warning"] = "Could not uninstall the test package; reset or discard this emulator before another job."
+                if report["status"] == "completed":
+                    report["status"] = "failed"
+                    report["error"] = report["cleanup_warning"]
+
         if isinstance(report.get("network_profile"), dict):
-            report["network_profile"]["reset"] = reset_evidence
-        if reset_evidence.get("status") != "verified":
-            report["cleanup_warning"] = "Could not verify restoration of emulator network settings; discard or reset this emulator before reuse."
-            if report["status"] == "completed":
-                report["status"] = "failed"
-                report["error"] = report["cleanup_warning"]
+            net_reset = condition_manager.cleanup_records.get("details", {}).get("network")
+            if net_reset:
+                report["network_profile"]["reset"] = net_reset
+            elif re.fullmatch(r"emulator-\d+", serial) and "reset" not in report["network_profile"]:
+                report["network_profile"]["reset"] = reset_emulator_network_profile(serial)
+            if report["network_profile"].get("reset", {}).get("status") != "verified":
+                report["cleanup_warning"] = "Could not verify restoration of emulator network settings; discard or reset this emulator before reuse."
+                if report["status"] == "completed":
+                    report["status"] = "failed"
+                    report["error"] = report["cleanup_warning"]
+
+        report["condition_evidence"] = condition_manager.get_evidence()
+        if condition_manager.applied_conditions:
+            cleanup_status = condition_manager.cleanup_records.get("status")
+            if cleanup_status != "verified":
+                report["cleanup_warning"] = "Could not verify restoration of emulator condition settings; discard or reset this emulator before reuse."
+                if report["status"] == "completed":
+                    report["status"] = "failed"
+                    report["error"] = report["cleanup_warning"]
     report["finished_at"] = now()
     args.out.mkdir(parents=True, exist_ok=True)
     report_path = args.out / (digest[:12] + ".report.json")

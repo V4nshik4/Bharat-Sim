@@ -207,5 +207,222 @@ class StructuredLogcatSignalTests(unittest.TestCase):
         self.assertEqual(extract_logcat_signals("Activity started\\nUI rendered\\n"), [])
 
 
+class RunnerConditionEvidenceTests(unittest.TestCase):
+    def _create_mock_apk(self, path):
+        import zipfile
+
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("AndroidManifest.xml", b"<manifest package='com.example.smoke'/>")
+
+    def test_runner_report_includes_condition_evidence_and_network_profile(self):
+        import json
+        import os
+        import sys
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from worker.runner import main
+
+        status_output = """Current network status:
+ download speed: 1200000 bits/s (146.5 KB/s)
+ upload speed: 350000 bits/s (42.7 KB/s)
+ minimum latency: 180 ms
+ maximum latency: 180 ms
+ OK
+"""
+        status_reset = """Current network status:
+ download speed: 0 bits/s (0.0 KB/s)
+ upload speed: 0 bits/s (0.0 KB/s)
+ minimum latency: 0 ms
+ maximum latency: 0 ms
+ OK
+"""
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            apk_path = work / "test.apk"
+            self._create_mock_apk(apk_path)
+            out_dir = work / "out"
+            profile_path = work / "profile.json"
+            profile_path.write_text(
+                json.dumps({
+                    "id": "budget-android",
+                    "latency_ms": 180,
+                    "down_kbps": 1200,
+                    "up_kbps": 350,
+                    "packet_loss_pct": 2.0,
+                    "battery_saver": True,
+                    "storage_free_mb": 600,
+                    "ram_mb": 2048,
+                }),
+                encoding="utf-8",
+            )
+
+            status_count = [0]
+            low_power_state = ["1"]
+            file_exists = [True]
+
+            def mock_cmd(args, timeout=20):
+                cmd = " ".join(args)
+                if "get-state" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="device\n", stderr="")
+                if "dump badging" in cmd:
+                    return CompletedProcess(
+                        args=args, returncode=0, stdout="package: name='com.example.smoke'\n", stderr=""
+                    )
+                if "emu network status" in cmd:
+                    status_count[0] += 1
+                    # After first call, return reset status
+                    out = status_output if status_count[0] <= 1 else status_reset
+                    return CompletedProcess(args=args, returncode=0, stdout=out, stderr="")
+                if "emu network delay" in cmd or "emu network speed" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="OK\n", stderr="")
+                if "settings put global low_power 0" in cmd:
+                    low_power_state[0] = "0"
+                    return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                if "settings get global low_power" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout=f"{low_power_state[0]}\n", stderr="")
+                if "cmd battery" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                if "df" in cmd:
+                    return CompletedProcess(
+                        args=args,
+                        returncode=0,
+                        stdout="Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/block/dm-0 5800000 1800000 4000000 31% /data\n",
+                        stderr="",
+                    )
+                if "rm -f" in cmd:
+                    file_exists[0] = False
+                    return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                if "ls" in cmd:
+                    if file_exists[0]:
+                        return CompletedProcess(args=args, returncode=0, stdout="-rw-r--r--\n", stderr="")
+                    return CompletedProcess(args=args, returncode=1, stdout="", stderr="No such file\n")
+                if "dd if=/dev/zero" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                if "cat /proc/meminfo" in cmd:
+                    return CompletedProcess(
+                        args=args,
+                        returncode=0,
+                        stdout="MemTotal: 2097152 kB\nMemAvailable: 1048576 kB\n",
+                        stderr="",
+                    )
+                if "logcat -c" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                if "install" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="Success\n", stderr="")
+                if "monkey" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="Events injected: 1\n", stderr="")
+                if "BharatSimNetworkProbe" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return CompletedProcess(args=args, returncode=0, stdout="OK\n", stderr="")
+
+            def mock_adb_retry(serial, args, timeout=30, attempts=3):
+                cmd = " ".join(args)
+                if "logcat" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="App started\n", stderr="")
+                if "uninstall" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="Success\n", stderr="")
+                return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+            with patch.dict(os.environ, {"BHARATSIM_ENABLE_LOCAL_APK_EXECUTION": "true", "ANDROID_SERIAL": "emulator-5554"}), \
+                 patch("shutil.which", return_value="/bin/tool"), \
+                 patch("time.sleep", return_value=None), \
+                 patch("worker.runner.run_cmd", side_effect=mock_cmd), \
+                 patch("worker.runner.run_adb_with_retry", side_effect=mock_adb_retry), \
+                 patch.object(sys, "argv", [
+                     "runner.py", str(apk_path),
+                     "--persona-profile", str(profile_path),
+                     "--duration", "5",
+                     "--out", str(out_dir),
+                 ]):
+                rc = main()
+
+            reports = list(out_dir.glob("*.report.json"))
+            self.assertEqual(len(reports), 1)
+            report = json.loads(reports[0].read_text(encoding="utf-8"))
+
+            # Check network profile preserved
+            self.assertIn("network_profile", report)
+            self.assertIsNotNone(report["network_profile"])
+            self.assertEqual(report["network_profile"]["control_plane"]["status"], "verified")
+            self.assertFalse(report["network_profile"]["traffic_path_verified"])
+
+            # Check condition evidence added
+            self.assertIn("condition_evidence", report)
+            cond_ev = report["condition_evidence"]
+            self.assertIsNotNone(cond_ev)
+            self.assertEqual(cond_ev["persona_id"], "budget-android")
+            self.assertFalse(cond_ev["traffic_path_verified"])
+
+            # Check unsupported condition behavior
+            packet_loss_entry = next((c for c in cond_ev["conditions"] if c["condition"] == "packet_loss"), None)
+            self.assertIsNotNone(packet_loss_entry)
+            self.assertEqual(packet_loss_entry["apply_status"], "unsupported")
+            self.assertEqual(packet_loss_entry["verification_status"], "unsupported")
+
+    def test_runner_guarantees_cleanup_after_launch_failure(self):
+        import json
+        import os
+        import sys
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from worker.runner import main
+
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            apk_path = work / "test.apk"
+            self._create_mock_apk(apk_path)
+            out_dir = work / "out"
+
+            def mock_cmd(args, timeout=20):
+                cmd = " ".join(args)
+                if "get-state" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="device\n", stderr="")
+                if "dump badging" in cmd:
+                    return CompletedProcess(
+                        args=args, returncode=0, stdout="package: name='com.example.smoke'\n", stderr=""
+                    )
+                if "logcat -c" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                if "install" in cmd:
+                    return CompletedProcess(args=args, returncode=0, stdout="Success\n", stderr="")
+                if "monkey" in cmd:
+                    # Simulate launch failure
+                    return CompletedProcess(args=args, returncode=1, stdout="", stderr="No activities found\n")
+                return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+            uninstall_called = [False]
+
+            def mock_adb_retry(serial, args, timeout=30, attempts=3):
+                cmd = " ".join(args)
+                if "uninstall" in cmd:
+                    uninstall_called[0] = True
+                    return CompletedProcess(args=args, returncode=0, stdout="Success\n", stderr="")
+                return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+            with patch.dict(os.environ, {"BHARATSIM_ENABLE_LOCAL_APK_EXECUTION": "true", "ANDROID_SERIAL": "emulator-5554"}), \
+                 patch("shutil.which", return_value="/bin/tool"), \
+                 patch("time.sleep", return_value=None), \
+                 patch("worker.runner.run_cmd", side_effect=mock_cmd), \
+                 patch("worker.runner.run_adb_with_retry", side_effect=mock_adb_retry), \
+                 patch.object(sys, "argv", [
+                     "runner.py", str(apk_path),
+                     "--duration", "5",
+                     "--out", str(out_dir),
+                 ]):
+                rc = main()
+                self.assertEqual(rc, 1)
+
+            reports = list(out_dir.glob("*.report.json"))
+            self.assertEqual(len(reports), 1)
+            report = json.loads(reports[0].read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "failed")
+            self.assertIn("could not launch app", report.get("error", ""))
+            # Verify cleanup uninstall was executed
+            self.assertTrue(uninstall_called[0])
+            self.assertTrue(any(s["name"] == "cleanup_uninstall" for s in report["steps"]))
+
+
 if __name__ == "__main__":
     unittest.main()
