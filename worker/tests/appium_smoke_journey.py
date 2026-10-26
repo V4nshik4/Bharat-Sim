@@ -65,7 +65,7 @@ def speed_limits_bps(speed: str) -> tuple[int, int]:
     presets = {
         "full": (0, 0),
         "umts": (384_000, 384_000),
-        "edge": (118_400, 236_800),
+        "edge": (473_600, 473_600),
     }
     if speed in presets:
         return presets[speed]
