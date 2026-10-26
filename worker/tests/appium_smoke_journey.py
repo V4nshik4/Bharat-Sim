@@ -362,7 +362,7 @@ def main() -> int:
             "package_name": "org.bharatsim.smokeapp",
             "probe_endpoint": os.getenv("BHARATSIM_PROBE_URL", "not-configured"),
             "probe_endpoint_scope": "Public HTTPS transfer from speed.cloudflare.com; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the simulated cellular route. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
-            "probe_payload_bytes": 2_000_000,
+            "probe_payload_bytes": 500_000,
             "probe_endpoint_ip": expected_ip,
             "probe_logcat": str(probe_logcat_path),
             "assertions": [
