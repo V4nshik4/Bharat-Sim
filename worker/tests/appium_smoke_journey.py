@@ -204,7 +204,8 @@ def parse_probe_text(text: str) -> dict[str, object] | None:
     }
 
 
-def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: int = 160) -> dict:
+# A 500 KB fixture transfer should complete well below this bound, even under EDGE throttling.
+def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: int = 60) -> dict:
     deadline = time.monotonic() + timeout
     last_text = ""
     while time.monotonic() < deadline:
