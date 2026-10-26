@@ -6,7 +6,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 PAYLOAD_SIZE = 2_000_000
-PAYLOAD = (b"BharatSim controlled network probe payload\n" * ((PAYLOAD_SIZE // 42) + 1))[:PAYLOAD_SIZE]
+PAYLOAD_UNIT = b"BharatSim controlled network probe payload\\n"
+PAYLOAD = (PAYLOAD_UNIT * ((PAYLOAD_SIZE // len(PAYLOAD_UNIT)) + 1))[:PAYLOAD_SIZE]
 
 
 class Handler(BaseHTTPRequestHandler):
