@@ -51,14 +51,13 @@ def adb(*args: str, timeout: int = 20) -> str:
     return output
 
 
-def preserve_default_transport() -> None:
-    """Keep the emulator's default working route instead of forcing an unproven radio path.
-
-    Android Emulator console delay/speed settings are verified separately. The probe
-    must use a real reachable network and record its observed transport; disabling
-    Wi-Fi can leave some hosted emulator images without a usable cellular route.
-    """
-    time.sleep(2)
+def prepare_cellular_transport() -> None:
+    """Attach the emulator's simulated cellular data route before measuring its profile."""
+    adb("emu", "gsm", "voice", "home")
+    adb("emu", "gsm", "data", "home")
+    adb("shell", "svc", "wifi", "disable")
+    adb("shell", "svc", "data", "enable")
+    time.sleep(5)
 
 
 def speed_limits_bps(speed: str) -> tuple[int, int]:
@@ -229,8 +228,8 @@ def main() -> int:
     phase = "configure_baseline_profile"
     evidence: dict[str, object] = {}
     try:
-        phase = "preserve_default_transport"
-        preserve_default_transport()
+        phase = "prepare_cellular_transport"
+        prepare_cellular_transport()
         phase = "configure_baseline_profile"
         baseline_profile = set_network_profile(None, "full")
         evidence["baseline_profile"] = baseline_profile
@@ -376,7 +375,7 @@ def main() -> int:
             "status": "passed",
             "package_name": "org.bharatsim.smokeapp",
             "probe_endpoint": os.getenv("BHARATSIM_PROBE_URL", "not-configured"),
-            "probe_endpoint_scope": "Public HTTPS transfer from proof.ovh.net; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the emulator's observed active transport, which is recorded in evidence. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
+            "probe_endpoint_scope": "Public HTTPS transfer from proof.ovh.net; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the simulated cellular route, verified by Android NetworkCapabilities. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
             "probe_payload_bytes": PROBE_BYTES,
             "probe_endpoint_ip": expected_ip,
             "observed_transport": expected_transport,
@@ -386,7 +385,7 @@ def main() -> int:
                 "tap changes the status text to Primary action completed",
                 "each probe downloaded exactly 500,000 bytes from the public HTTPS endpoint through the Android Emulator network stack",
                 "per-request retry counts are captured in probe evidence",
-                "baseline, latency-only, and bandwidth-only probes used the same observed Android Emulator transport",
+                "baseline, latency-only, and bandwidth-only probes used the same simulated cellular transport",
                 "latency-only median duration exceeded baseline by at least 50 ms",
                 "bandwidth-only median duration exceeded baseline by at least 500 ms",
                 "emulator network console readback matched each requested profile",
