@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 BASE = "http://127.0.0.1:4723"
 ADB_SERIAL = "emulator-5554"
-PROBE_BYTES = 500_000
+PROBE_BYTES = 2_000_000
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 PROBE_RE = re.compile(r"HTTP (200|206) · (\d+) ms · (CELLULAR|ETHERNET|WIFI|UNKNOWN|OTHER) · probe (\d+) · bytes (\d+) · attempts (\d+)")
 
@@ -52,9 +52,7 @@ def adb(*args: str, timeout: int = 20) -> str:
 
 
 def prepare_cellular_transport() -> None:
-    """Register the simulated cellular network before disabling Wi-Fi."""
-    # The emulator must attach the simulated radio while a working route still
-    # exists; disabling Wi-Fi first can leave the guest with no default route.
+    """Attach the emulator's simulated cellular data route before measuring its profile."""
     adb("emu", "gsm", "voice", "home")
     adb("emu", "gsm", "data", "home")
     adb("shell", "svc", "wifi", "disable")
@@ -204,7 +202,8 @@ def parse_probe_text(text: str) -> dict[str, object] | None:
     }
 
 
-def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: int = 160) -> dict:
+# A 500 KB fixture transfer should complete well below this bound, even under EDGE throttling.
+def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: int = 60) -> dict:
     deadline = time.monotonic() + timeout
     last_text = ""
     while time.monotonic() < deadline:
@@ -262,6 +261,8 @@ def main() -> int:
         if status_text != "Ready":
             raise RuntimeError(f"Fixture did not start in the expected Ready state: {status_text!r}")
 
+        expected_transport: str | None = None
+
         def take_samples(label: str, previous_sequence: int) -> tuple[list[dict], int]:
             samples: list[dict] = []
             evidence["samples_" + label] = samples
@@ -273,7 +274,11 @@ def main() -> int:
                     raise RuntimeError(f"Primary action state assertion failed during {label}: {status!r}")
                 probe = wait_for_probe(session_id, probe_id, after_sequence=last_sequence)
                 if probe["transport"] != "CELLULAR":
-                    raise RuntimeError(f"{label} request used unsupported transport: {probe}")
+                    raise RuntimeError(f"{label} request did not use the required simulated cellular transport: {probe}")
+                if expected_transport is not None and probe["transport"] != expected_transport:
+                    raise RuntimeError(
+                        f"{label} request changed transport from {expected_transport} to {probe['transport']}: {probe}"
+                    )
                 samples.append(probe)
                 last_sequence = probe["sequence"]
             return samples, last_sequence
@@ -281,19 +286,21 @@ def main() -> int:
         # Exclude one cold-start download from all timing comparisons.
         request("POST", base + f"/element/{action_id}/click", {})
         warmup_probe = wait_for_probe(session_id, probe_id, after_sequence=0)
-        if warmup_probe["transport"] not in ("CELLULAR", "ETHERNET"):
-            raise RuntimeError(f"Warm-up request used unsupported transport: {warmup_probe}")
+        if warmup_probe["transport"] != "CELLULAR":
+            raise RuntimeError(f"Warm-up request did not use the required simulated cellular transport: {warmup_probe}")
+        expected_transport = str(warmup_probe["transport"])
+        evidence["observed_transport"] = expected_transport
         last_sequence = warmup_probe["sequence"]
 
         phase = "baseline_samples"
         baseline_probes, last_sequence = take_samples("baseline", last_sequence)
         evidence["baseline_probes"] = baseline_probes
 
-        # Test bandwidth immediately after baseline to isolate whether the
-        # speed control itself affects the next real HTTP transfer. A 5 Mbps
-        # cap is below the unbounded baseline but keeps the 2 MB transfer bounded.
+        # Test bandwidth immediately after baseline with a custom 8 Mbps cap.
+        # The 2 MB transfer makes the expected throughput effect observable while
+        # avoiding the EDGE radio preset, which stalled the HTTPS request.
         phase = "configure_bandwidth_profile"
-        bandwidth_profile = set_network_profile(None, "edge")
+        bandwidth_profile = set_network_profile(None, "8000:8000")
         evidence["bandwidth_profile"] = bandwidth_profile
         phase = "bandwidth_samples"
         bandwidth_probes, last_sequence = take_samples("bandwidth-only", last_sequence)
@@ -368,9 +375,10 @@ def main() -> int:
             "status": "passed",
             "package_name": "org.bharatsim.smokeapp",
             "probe_endpoint": os.getenv("BHARATSIM_PROBE_URL", "not-configured"),
-            "probe_endpoint_scope": "Public HTTPS transfer from proof.ovh.net; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the simulated cellular route. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
+            "probe_endpoint_scope": "Public HTTPS transfer from proof.ovh.net; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the simulated cellular route, verified by Android NetworkCapabilities. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
             "probe_payload_bytes": PROBE_BYTES,
             "probe_endpoint_ip": expected_ip,
+            "observed_transport": expected_transport,
             "probe_logcat": str(probe_logcat_path),
             "assertions": [
                 "primary action is located by stable accessibility identifier",

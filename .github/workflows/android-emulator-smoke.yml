@@ -101,12 +101,12 @@ jobs:
           fi
           echo "Resolved proof.ovh.net to $ip"
           # Fail early if the public test endpoint is unavailable from the CI host.
-          curl --fail --silent --show-error --location --range 0-0 --output /dev/null https://proof.ovh.net/files/1Mb.dat
+          curl --fail --silent --show-error --location --range 0-0 --output /dev/null https://proof.ovh.net/files/10Mb.dat
           echo "ip=$ip" >> "$GITHUB_OUTPUT"
       - name: Build known-good test APK
         working-directory: smoke-android
         env:
-          BHARATSIM_PROBE_URL: https://proof.ovh.net/files/1Mb.dat
+          BHARATSIM_PROBE_URL: https://proof.ovh.net/files/10Mb.dat
           BHARATSIM_PROBE_IP: ${{ steps.probe-address.outputs.ip }}
         run: gradle --no-daemon assembleDebug
       - name: Add Android build-tools to PATH
@@ -125,7 +125,7 @@ jobs:
       - name: Boot disposable Android emulator and execute runner
         uses: reactivecircus/android-emulator-runner@v2
         env:
-          BHARATSIM_PROBE_URL: https://proof.ovh.net/files/1Mb.dat
+          BHARATSIM_PROBE_URL: https://proof.ovh.net/files/10Mb.dat
           BHARATSIM_PROBE_IP: ${{ steps.probe-address.outputs.ip }}
         with:
           api-level: 35
@@ -133,7 +133,7 @@ jobs:
           arch: x86_64
           profile: pixel_2
           disable-animations: true
-          # The fixture pins the resolved endpoint IP while validating TLS against the URL hostname.
+          # The fixture pins the resolved endpoint IP while validating TLS against the URL hostname; it records the active emulator transport.
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
           script: bash scripts/ci/android-emulator-e2e.sh
       - name: Generate evidence artifact manifest

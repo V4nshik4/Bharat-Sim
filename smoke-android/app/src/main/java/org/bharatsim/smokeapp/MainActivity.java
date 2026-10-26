@@ -34,7 +34,7 @@ import javax.net.ssl.SSLPeerUnverifiedException;
 public final class MainActivity extends Activity {
     private static final String TAG = "BharatSimNetworkProbe";
     private static final String PROBE_URL = BuildConfig.PROBE_URL;
-    private static final int PROBE_BYTES = 500_000;
+    private static final int PROBE_BYTES = 2_000_000;
     private int probeSequence = 0;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -122,7 +122,8 @@ public final class MainActivity extends Activity {
                 }
                 Log.e(TAG, "BHARATSIM_NETWORK_PROBE status=ERROR transport=" + transport
                         + " probe=" + sequence + " attempts=" + attempt, exception);
-                final String message = "Network probe failed: " + exception.getClass().getSimpleName();
+                final String detail = exception.getMessage() == null ? "" : exception.getMessage().replaceAll("[\\r\\n]+", " ").substring(0, Math.min(180, exception.getMessage().replaceAll("[\\r\\n]+", " ").length()));
+                final String message = "Network probe failed: " + exception.getClass().getSimpleName() + (detail.isEmpty() ? "" : " · " + detail);
                 runOnUiThread(() -> target.setText(message));
                 return;
             }
