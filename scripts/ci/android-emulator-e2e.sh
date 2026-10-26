@@ -25,7 +25,7 @@ export BHARATSIM_WORKER_TOKEN="$(python -c 'import secrets; print(secrets.token_
 export BHARATSIM_DATA_DIR="$RUNNER_TEMP/bharatsim-api-data"
 
 mkdir -p artifacts
-DNSMASQ_PID_FILE="$RUNNER_TEMP/bharatsim-dnsmasq.pid"
+DNSMASQ_PID=
 API_PID=
 WORKER_PID=
 APPIUM_PID=
@@ -35,10 +35,7 @@ cleanup() {
   adb -s emulator-5554 emu network speed full >/dev/null 2>&1 || true
   adb -s emulator-5554 shell svc wifi enable >/dev/null 2>&1 || true
   adb -s emulator-5554 shell svc data enable >/dev/null 2>&1 || true
-  if [ -s "$DNSMASQ_PID_FILE" ]; then
-    sudo kill "$(cat "$DNSMASQ_PID_FILE")" 2>/dev/null || true
-    rm -f "$DNSMASQ_PID_FILE"
-  fi
+  [ -z "$DNSMASQ_PID" ] || sudo kill "$DNSMASQ_PID" 2>/dev/null || true
   [ -z "$APPIUM_PID" ] || kill "$APPIUM_PID" 2>/dev/null || true
   [ -z "$WORKER_PID" ] || kill "$WORKER_PID" 2>/dev/null || true
   [ -z "$API_PID" ] || kill "$API_PID" 2>/dev/null || true
@@ -50,20 +47,16 @@ trap cleanup EXIT
 # public DNS reachability from the emulator while preserving real outbound HTTPS.
 DNS_UPSTREAM="$(awk '$1 == "nameserver" && $2 !~ /^127\./ { print $2; exit }' /run/systemd/resolve/resolv.conf 2>/dev/null || true)"
 if [ -z "$DNS_UPSTREAM" ]; then DNS_UPSTREAM=168.63.129.16; fi
-sudo dnsmasq --no-daemon --pid-file="$DNSMASQ_PID_FILE" --listen-address=127.0.0.1 \
+sudo dnsmasq --no-daemon --listen-address=127.0.0.1 \
   --bind-interfaces --port=53 --no-resolv --server="$DNS_UPSTREAM" --server=168.63.129.16 \
   > artifacts/dnsmasq.log 2>&1 &
-for attempt in $(seq 1 15); do
-  if [ -s "$DNSMASQ_PID_FILE" ] && sudo kill -0 "$(cat "$DNSMASQ_PID_FILE")" 2>/dev/null; then
-    break
-  fi
-  if [ "$attempt" -eq 15 ]; then
-    cat artifacts/dnsmasq.log >&2 || true
-    echo "Local DNS forwarder did not become ready" >&2
-    exit 1
-  fi
-  sleep 1
-done
+DNSMASQ_PID=$!
+sleep 1
+if ! sudo ss -lunp | grep -q '127.0.0.1:53'; then
+  cat artifacts/dnsmasq.log >&2 || true
+  echo "Local DNS forwarder did not bind 127.0.0.1:53" >&2
+  exit 1
+fi
 
 (cd backend && exec uvicorn app.main:app --host 0.0.0.0 --port 8000) > artifacts/api.log 2>&1 &
 API_PID=$!
