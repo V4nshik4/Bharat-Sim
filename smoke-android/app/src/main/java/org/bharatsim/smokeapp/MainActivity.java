@@ -19,6 +19,7 @@ import java.net.URL;
 public final class MainActivity extends Activity {
     private static final String TAG = "BharatSimNetworkProbe";
     private static final String PROBE_URL = BuildConfig.PROBE_URL;
+    private static final int PROBE_BYTES = 2_000_000;
     private int probeSequence = 0;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -31,7 +32,6 @@ public final class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText("BharatSim Android smoke test");
-        title.setContentDescription("fixture-title");
         title.setContentDescription("fixture-title");
         title.setTextSize(24);
         title.setTextColor(Color.rgb(30, 70, 45));
@@ -85,39 +85,46 @@ public final class MainActivity extends Activity {
             HttpURLConnection connection = null;
             try {
                 connection = (HttpURLConnection) new URL(PROBE_URL).openConnection();
-                connection.setConnectTimeout(15000);
+                connection.setConnectTimeout(5000);
                 connection.setReadTimeout(30000);
                 connection.setRequestMethod("GET");
                 connection.setRequestProperty("Connection", "close");
                 connection.setRequestProperty("Accept-Encoding", "identity");
                 connection.setRequestProperty("Cache-Control", "no-cache");
+                connection.setRequestProperty("Range", "bytes=0-" + (PROBE_BYTES - 1));
                 connection.setUseCaches(false);
                 statusCode = connection.getResponseCode();
-                if (statusCode != 200) {
+                if (statusCode != 200 && statusCode != 206) {
                     throw new java.io.IOException("Unexpected HTTP status " + statusCode);
                 }
+                // Read exactly the requested bounded payload. Do not wait for
+                // server EOF after the byte count is satisfied: a CDN or proxy
+                // may keep the connection alive after delivering the requested bytes.
                 try (java.io.InputStream input = connection.getInputStream()) {
                     byte[] buffer = new byte[8192];
-                    int count;
-                    while ((count = input.read(buffer)) != -1) {
+                    while (bytesRead < PROBE_BYTES) {
+                        int wanted = Math.min(buffer.length, PROBE_BYTES - bytesRead);
+                        int count = input.read(buffer, 0, wanted);
+                        if (count == -1) break;
                         bytesRead += count;
                     }
                 }
-                if (bytesRead != 2000000) {
-                    throw new IllegalStateException("Expected 2000000 probe bytes, received " + bytesRead);
+                if (bytesRead != PROBE_BYTES) {
+                    throw new IllegalStateException("Expected " + PROBE_BYTES + " probe bytes, received " + bytesRead);
                 }
                 long duration = SystemClock.elapsedRealtime() - started;
-                Log.i(TAG, "BHARATSIM_NETWORK_PROBE status=HTTP_200 duration_ms=" + duration
+                Log.i(TAG, "BHARATSIM_NETWORK_PROBE status=HTTP_" + statusCode + " duration_ms=" + duration
                         + " transport=" + transport + " probe=" + sequence
                         + " bytes_read=" + bytesRead + " attempts=" + attempt);
-                final String message = "HTTP 200 · " + duration + " ms · " + transport
+                final String message = "HTTP " + statusCode + " · " + duration + " ms · " + transport
                         + " · probe " + sequence + " · bytes " + bytesRead + " · attempts " + attempt;
                 runOnUiThread(() -> target.setText(message));
                 return;
             } catch (Exception exception) {
-                // Public DNS and routing can briefly fail in hosted CI. Retry bounded I/O
-                // failures with backoff; keep attempt counts in logcat and UI evidence.
-                // Malformed payloads are not retried, and a final failure is never a success.
+                // Transient host/emulator connection resets can occur in hosted CI. Retry
+                // bounded I/O failures with backoff; keep attempt counts in logcat
+                // and UI evidence. Malformed payloads are not retried, and a final
+                // failure is never reported as a successful measurement.
                 if (exception instanceof java.io.IOException && attempt < 4) {
                     Log.w(TAG, "BHARATSIM_NETWORK_PROBE retrying sequence=" + sequence
                             + " attempt=" + attempt + " after=" + exception.getClass().getSimpleName(), exception);
