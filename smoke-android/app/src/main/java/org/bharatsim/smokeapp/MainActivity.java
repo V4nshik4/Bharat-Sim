@@ -101,7 +101,7 @@ public final class MainActivity extends Activity {
                 Log.i(TAG, "BHARATSIM_NETWORK_PROBE status=HTTP_" + result.statusCode + " duration_ms=" + duration
                         + " transport=" + transport + " probe=" + sequence
                         + " bytes_read=" + result.bytesRead + " attempts=" + attempt
-                        + " endpoint_host=speed.cloudflare.com endpoint_ip=" + BuildConfig.PROBE_IP);
+                        + " endpoint_host=" + new URL(PROBE_URL).getHost() + " endpoint_ip=" + BuildConfig.PROBE_IP);
                 final String message = "HTTP " + result.statusCode + " · " + duration + " ms · " + transport
                         + " · probe " + sequence + " · bytes " + result.bytesRead + " · attempts " + attempt;
                 runOnUiThread(() -> target.setText(message));
