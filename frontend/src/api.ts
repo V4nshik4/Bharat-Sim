@@ -144,6 +144,7 @@ export type ConditionEvidence = {
   traffic_path_verified?: boolean;
   applied_conditions_count?: number;
   partially_applied_conditions_count?: number;
+  preexisting_conditions_count?: number;
   conditions?: ConditionRecord[];
   cleanup?: {
     status?: string;
