@@ -5,6 +5,7 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       BHARATSIM_ENV: ${BHARATSIM_ENV:-development}
+      BHARATSIM_DATABASE_URL: ${BHARATSIM_DATABASE_URL:-}
       BHARATSIM_DATA_DIR: /app/backend/data
       BHARATSIM_MAX_UPLOAD_MB: ${BHARATSIM_MAX_UPLOAD_MB:-150}
       BHARATSIM_REQUIRE_API_KEY: ${BHARATSIM_REQUIRE_API_KEY:-false}
