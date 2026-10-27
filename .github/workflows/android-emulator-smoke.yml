@@ -20,6 +20,9 @@ on:
       - ".github/workflows/android-emulator-smoke.yml"
 permissions:
   contents: read
+concurrency:
+  group: android-emulator-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   emulator-smoke:
     runs-on: ubuntu-latest
