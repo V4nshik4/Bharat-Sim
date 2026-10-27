@@ -30,9 +30,10 @@
 ### P0 — Prove real Android execution
 
 - [x] Provision a disposable Android emulator in GitHub Actions with Android SDK platform-tools and build-tools.
-- [x] Execute a source-built, authorized fixture APK through local FastAPI upload → queue/lease → worker → ADB install/launch/logcat → result callback → persisted run report. The latest recorded workflow passed the API-to-ADB pipeline and fixture Appium assertion; this does not prove arbitrary APK correctness or production isolation.
-- [x] Pass the Appium/UiAutomator2 fixture primary-action UI assertion in the disposable emulator workflow; the workflow asserts that tapping the stable accessibility identifier changes the status text and preserves a screenshot. This is a fixture journey, not a suite for arbitrary apps.
-- [ ] Exercise install failure, launch failure, worker crash, timeout, stale lease, duplicate callback, and retry recovery on a real worker.
+- [x] Execute a source-built, authorized fixture APK through local FastAPI upload → queue/lease → worker → ADB install/launch/logcat → result callback → persisted run report on earlier revisions. The latest main run failed because the worker did not claim the queued run; the integrated candidate adds worker registration checks and diagnostics. Do not claim the full pipeline passed on the release candidate until its current Android workflow succeeds.
+- [x] The basic Appium/UiAutomator2 fixture primary-action assertion is implemented and passed on an earlier revision. The current extended journey also performs real HTTPS network probes; the latest recorded candidate failed while waiting for the network probe to finish. The primary-action fixture pass does not count as current end-to-end release evidence.
+- [x] Exercise a real Android install-signature-conflict failure through API → worker → ADB → callback, and exercise an APK-shaped invalid-manifest failure through the real worker/API path. The workflow checks failed status, failure classification, and cleanup evidence.
+- [ ] Exercise launch failure, worker crash, timeout, stale lease, and retry recovery on a real worker. Duplicate/stale callback and retry-exhaustion protocol behavior have unit-level coverage, but not all are yet proven as full emulator journeys.
 - [ ] Verify worker heartbeat state and full run evidence/artifacts survive API restarts. Only run metadata persistence is currently covered by a process-restart integration test.
 - [ ] Capture screenshots and structured crash/ANR/exit evidence; distinguish a completed smoke procedure from a passing app journey.
 
