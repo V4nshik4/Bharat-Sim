@@ -26,8 +26,8 @@ class SupportedRoutePreflightTests(unittest.TestCase):
             patch.object(journey.time, "sleep"),
             patch.object(journey.time, "monotonic", side_effect=[0, *range(0, 23)]),
         ):
-            with self.assertRaisesRegex(RuntimeError, "no verified cellular default route") as error:
-                journey.prepare_cellular_transport()
+            with self.assertRaisesRegex(RuntimeError, "no verified cellular/Ethernet default route") as error:
+                journey.prepare_supported_transport()
         self.assertIn("route=", str(error.exception))
         self.assertIn("connectivity=", str(error.exception))
 
