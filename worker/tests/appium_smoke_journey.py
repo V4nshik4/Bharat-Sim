@@ -54,46 +54,54 @@ def adb(*args: str, timeout: int = 20) -> str:
 def prepare_supported_transport() -> None:
     """Establish a real route that Android Emulator console shaping supports.
 
-    The emulator console's delay/speed controls apply to cellular and Ethernet
-    paths, not modern emulator Wi-Fi traffic. Disable Wi-Fi, enable simulated
-    mobile data, and require a default route plus a supported transport before
-    any measurements are attempted. If this runner cannot provide that path,
-    fail explicitly instead of reporting an unshaped request as a measurement.
+    Android may install routes in per-network policy tables. Inspect all IPv4
+    tables before failing the preflight; the actual HTTPS probe remains the
+    final data-plane check. Wi-Fi is excluded because emulator-console shaping
+    does not cover modern Wi-Fi traffic.
     """
     adb("shell", "settings", "put", "global", "airplane_mode_on", "0")
     adb("shell", "settings", "put", "global", "mobile_data", "1")
     adb("shell", "svc", "data", "enable")
     adb("emu", "gsm", "voice", "home")
-    adb("emu", "gsm", "data", "on")
+    adb("emu", "gsm", "data", "home")
     adb("shell", "svc", "wifi", "disable")
 
     deadline = time.monotonic() + 30
     last_route = ""
+    last_route6 = ""
+    last_rules = ""
     last_connectivity = ""
     last_gsm = ""
     while time.monotonic() < deadline:
         try:
-            last_route = adb("shell", "ip", "route", "show", "default", timeout=5)
+            last_route = adb("shell", "ip", "route", "show", "table", "all", timeout=5)
+            last_route6 = adb("shell", "ip", "-6", "route", "show", "table", "all", timeout=5)
+            last_rules = adb("shell", "ip", "rule", "show", timeout=5)
             last_connectivity = adb("shell", "dumpsys", "connectivity", timeout=8)
             last_gsm = adb("emu", "gsm", "status", timeout=5)
-            match = re.search(r"\bdev\s+(\S+)", last_route)
-            interface = match.group(1).lower() if match else ""
-            supported_interface = bool(interface) and not (
-                interface.startswith("wlan") or interface.startswith("wifi")
+            default_routes = [
+                line.strip()
+                for line in last_route.splitlines()
+                if line.strip().split() and line.strip().split()[0] == "default"
+            ]
+            supported_route = any(
+                re.search(r"\\bdev\\s+(?!wlan|wifi)(\\S+)", line, re.I)
+                for line in default_routes
             )
             supported_transport = any(
                 transport in last_connectivity.upper() for transport in ("CELLULAR", "ETHERNET")
             )
-            if "default" in last_route.lower() and supported_interface and supported_transport:
+            if supported_route and supported_transport:
                 return
         except Exception as exc:
             last_gsm = f"preflight command failed: {exc}"
         time.sleep(1)
 
     raise RuntimeError(
-        "Android emulator has no verified cellular/Ethernet default route; refusing to call "
-        "an unsupported or unreachable path a network-shaping measurement. "
-        f"gsm={last_gsm[-1200:]!r}; route={last_route[-1200:]!r}; "
+        "Android emulator has no verified IPv4 default route on a supported cellular/Ethernet path; "
+        "refusing to call a failed/no-route request a network-shaping measurement. "
+        f"gsm={last_gsm[-1200:]!r}; IPv4 routes={last_route[-2500:]!r}; "
+        f"IPv6 routes={last_route6[-2500:]!r}; rules={last_rules[-2500:]!r}; "
         f"connectivity={last_connectivity[-4000:]!r}"
     )
 
