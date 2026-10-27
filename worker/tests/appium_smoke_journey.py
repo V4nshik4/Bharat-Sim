@@ -68,8 +68,10 @@ def prepare_supported_transport() -> None:
     does not cover modern Wi-Fi traffic.
     """
     adb("shell", "settings", "put", "global", "airplane_mode_on", "0")
+    # The global setting alone does not guarantee the framework has processed the radio state.
+    adb("shell", "cmd", "connectivity", "airplane-mode", "disable")
     adb("shell", "settings", "put", "global", "mobile_data", "1")
-    adb("shell", "svc", "data", "enable")
+    adb("shell", "cmd", "phone", "data", "enable")
     adb("emu", "gsm", "voice", "home")
     adb("emu", "gsm", "data", "home")
     adb("shell", "svc", "wifi", "disable")
