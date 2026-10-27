@@ -435,7 +435,7 @@ def main() -> int:
             "status": "passed",
             "package_name": "org.bharatsim.smokeapp",
             "probe_endpoint": os.getenv("BHARATSIM_PROBE_URL", "not-configured"),
-            "probe_endpoint_scope": "Public HTTPS transfer from proof.ovh.net; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the actual Android emulator Ethernet/cellular route, identified by Android NetworkCapabilities. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
+            "probe_endpoint_scope": f"Public HTTPS transfer from {expected_host}; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the actual Android emulator Ethernet/cellular route, identified by Android NetworkCapabilities. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
             "probe_payload_bytes": PROBE_BYTES,
             "probe_endpoint_ip": expected_ip,
             "observed_transport": expected_transport,
