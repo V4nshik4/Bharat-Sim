@@ -52,23 +52,22 @@ def adb(*args: str, timeout: int = 20) -> str:
 
 
 def prepare_supported_transport() -> None:
-    """Enable emulator connectivity and require a real default route before measuring.
+    """Establish a real route that Android Emulator console shaping supports.
 
-    Prefer the emulator's available route instead of assuming that simulated
-    cellular is usable on every CI host. The fixture's NetworkCapabilities
-    readback identifies the actual transport (CELLULAR or WIFI) for every
-    measured request; UNKNOWN/OTHER never counts as a successful measurement.
+    The emulator console's delay/speed controls apply to cellular and Ethernet
+    paths, not modern emulator Wi-Fi traffic. Disable Wi-Fi, enable simulated
+    mobile data, and require a default route plus a supported transport before
+    any measurements are attempted. If this runner cannot provide that path,
+    fail explicitly instead of reporting an unshaped request as a measurement.
     """
     adb("shell", "settings", "put", "global", "airplane_mode_on", "0")
     adb("shell", "settings", "put", "global", "mobile_data", "1")
     adb("shell", "svc", "data", "enable")
     adb("emu", "gsm", "voice", "home")
     adb("emu", "gsm", "data", "on")
-    # Keep Wi-Fi available as a genuine fallback route. Android itself chooses
-    # the active transport; the test records that choice rather than relabelling it.
-    adb("shell", "svc", "wifi", "enable")
+    adb("shell", "svc", "wifi", "disable")
 
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + 30
     last_route = ""
     last_connectivity = ""
     last_gsm = ""
@@ -77,15 +76,23 @@ def prepare_supported_transport() -> None:
             last_route = adb("shell", "ip", "route", "show", "default", timeout=5)
             last_connectivity = adb("shell", "dumpsys", "connectivity", timeout=8)
             last_gsm = adb("emu", "gsm", "status", timeout=5)
-            if "default" in last_route.lower():
+            match = re.search(r"\bdev\s+(\S+)", last_route)
+            interface = match.group(1).lower() if match else ""
+            supported_interface = bool(interface) and not (
+                interface.startswith("wlan") or interface.startswith("wifi")
+            )
+            supported_transport = any(
+                transport in last_connectivity.upper() for transport in ("CELLULAR", "ETHERNET")
+            )
+            if "default" in last_route.lower() and supported_interface and supported_transport:
                 return
         except Exception as exc:
             last_gsm = f"preflight command failed: {exc}"
         time.sleep(1)
 
     raise RuntimeError(
-        "Android emulator has no verified default network route; refusing to call "
-        "a failed/no-route request a network-shaping measurement. "
+        "Android emulator has no verified cellular/Ethernet default route; refusing to call "
+        "an unsupported or unreachable path a network-shaping measurement. "
         f"gsm={last_gsm[-1200:]!r}; route={last_route[-1200:]!r}; "
         f"connectivity={last_connectivity[-4000:]!r}"
     )
@@ -318,8 +325,8 @@ def main() -> int:
                 if status != "Primary action completed":
                     raise RuntimeError(f"Primary action state assertion failed during {label}: {status!r}")
                 probe = wait_for_probe(session_id, probe_id, after_sequence=last_sequence)
-                if probe["transport"] not in ("CELLULAR", "WIFI"):
-                    raise RuntimeError(f"{label} request did not use a verified cellular or Wi-Fi transport: {probe}")
+                if probe["transport"] not in ("CELLULAR", "ETHERNET"):
+                    raise RuntimeError(f"{label} request did not use a transport supported by emulator-console shaping (CELLULAR/ETHERNET): {probe}")
                 if expected_transport is not None and probe["transport"] != expected_transport:
                     raise RuntimeError(
                         f"{label} request changed transport from {expected_transport} to {probe['transport']}: {probe}"
@@ -331,8 +338,8 @@ def main() -> int:
         # Exclude one cold-start download from all timing comparisons.
         request("POST", base + f"/element/{action_id}/click", {})
         warmup_probe = wait_for_probe(session_id, probe_id, after_sequence=0)
-        if warmup_probe["transport"] not in ("CELLULAR", "WIFI"):
-            raise RuntimeError(f"Warm-up request did not use a verified cellular or Wi-Fi transport: {warmup_probe}")
+        if warmup_probe["transport"] not in ("CELLULAR", "ETHERNET"):
+            raise RuntimeError(f"Warm-up request did not use a transport supported by emulator-console shaping (CELLULAR/ETHERNET): {warmup_probe}")
         expected_transport = str(warmup_probe["transport"])
         evidence["observed_transport"] = expected_transport
         last_sequence = warmup_probe["sequence"]
