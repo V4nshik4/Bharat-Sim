@@ -232,8 +232,9 @@ def parse_probe_text(text: str) -> dict[str, object] | None:
     }
 
 
-# A 500 KB fixture transfer should complete within this bound under the supported test profiles.
-# A 2 MB transfer at the supported 256 kbps profile needs about 63 seconds before RTT/retries.
+# Each fixture probe transfers 500 KB. The 1 Mbps bandwidth profile needs about 4 seconds
+# for payload bytes alone; the device socket has a 30-second bounded read timeout to tolerate
+# real endpoint/TLS variation without treating an incomplete transfer as a measurement.
 def network_probe_log_tail() -> str:
     """Return real device-side probe diagnostics when a UI wait fails."""
     try:
