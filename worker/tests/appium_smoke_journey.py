@@ -52,12 +52,42 @@ def adb(*args: str, timeout: int = 20) -> str:
 
 
 def prepare_cellular_transport() -> None:
-    """Attach the emulator's simulated cellular data route before measuring its profile."""
-    adb("emu", "gsm", "voice", "home")
-    adb("emu", "gsm", "data", "home")
-    adb("shell", "svc", "wifi", "disable")
+    """Establish and verify a routed cellular network before measuring emulator shaping.
+
+    Do not assume that a successful emulator-console command means Android has an
+    active data route. This preflight fails with network diagnostics instead of
+    allowing an HTTP probe to hang and later being mistaken for a shaping result.
+    """
+    adb("shell", "settings", "put", "global", "airplane_mode_on", "0")
+    adb("shell", "settings", "put", "global", "mobile_data", "1")
     adb("shell", "svc", "data", "enable")
-    time.sleep(5)
+    adb("emu", "gsm", "voice", "home")
+    adb("emu", "gsm", "data", "on")
+    adb("shell", "svc", "wifi", "disable")
+
+    deadline = time.monotonic() + 20
+    last_route = ""
+    last_connectivity = ""
+    last_gsm = ""
+    while time.monotonic() < deadline:
+        try:
+            last_route = adb("shell", "ip", "route", "show", "default", timeout=5)
+            last_connectivity = adb("shell", "dumpsys", "connectivity", timeout=8)
+            last_gsm = adb("emu", "gsm", "status", timeout=5)
+            has_cellular = "CELLULAR" in last_connectivity.upper()
+            has_default_route = "default" in last_route.lower()
+            if has_cellular and has_default_route:
+                return
+        except Exception as exc:
+            last_gsm = f"preflight command failed: {exc}"
+        time.sleep(1)
+
+    raise RuntimeError(
+        "Android emulator has no verified cellular default route; refusing to call "
+        "a failed/no-route request a network-shaping measurement. "
+        f"gsm={last_gsm[-1200:]!r}; route={last_route[-1200:]!r}; "
+        f"connectivity={last_connectivity[-4000:]!r}"
+    )
 
 
 def speed_limits_bps(speed: str) -> tuple[int, int]:
