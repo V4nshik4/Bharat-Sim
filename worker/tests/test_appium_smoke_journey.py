@@ -4,8 +4,8 @@ from unittest.mock import patch
 from worker.tests import appium_smoke_journey as journey
 
 
-class CellularRoutePreflightTests(unittest.TestCase):
-    def test_preflight_requires_active_cellular_route(self):
+class SupportedRoutePreflightTests(unittest.TestCase):
+    def test_preflight_requires_a_default_route(self):
         commands = [
             "", "", "", "", "", "",  # airplane/mobile data, service, GSM, Wi-Fi setup
             "default via 10.0.2.2 dev rmnet_data0",
@@ -13,7 +13,7 @@ class CellularRoutePreflightTests(unittest.TestCase):
             "gsm voice state: home\ngsm data state: home",
         ]
         with patch.object(journey, "adb", side_effect=commands) as adb_call, patch.object(journey.time, "sleep"):
-            journey.prepare_cellular_transport()
+            journey.prepare_supported_transport()
         self.assertEqual(adb_call.call_count, 9)
 
     def test_preflight_fails_with_diagnostics_when_no_route_exists(self):
