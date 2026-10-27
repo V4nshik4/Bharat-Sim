@@ -16,6 +16,18 @@ class SupportedRoutePreflightTests(unittest.TestCase):
             journey.prepare_supported_transport()
         self.assertEqual(adb_call.call_count, 9)
 
+
+    def test_preflight_accepts_shapeable_ethernet_route(self):
+        commands = [
+            "", "", "", "", "", "",
+            "default via 10.0.2.1 dev eth0",
+            "Active default network: ETHERNET; NET_CAPABILITY_INTERNET",
+            "gsm voice state: home\ngsm data state: home",
+        ]
+        with patch.object(journey, "adb", side_effect=commands) as adb_call, patch.object(journey.time, "sleep"):
+            journey.prepare_supported_transport()
+        self.assertEqual(adb_call.call_count, 9)
+
     def test_preflight_fails_with_diagnostics_when_no_route_exists(self):
         commands = [
             "", "", "", "", "", "",  # setup commands
