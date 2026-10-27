@@ -77,10 +77,13 @@ export default function RunDetailView({ personas }: RunDetailViewProps) {
     void fetchRun(true);
   }, [fetchRun]);
 
-  // Auto-refresh every 5s while status is queued or leased
+  // Auto-refresh while the worker is missing, queued, or actively running.
   useEffect(() => {
     if (!run) return;
-    const isPending = run.status === "queued" || run.status === "leased";
+    const isPending =
+      run.status === "awaiting_worker" ||
+      run.status === "queued" ||
+      run.status === "leased";
     if (!isPending) return;
 
     const interval = window.setInterval(() => {
