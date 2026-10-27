@@ -92,14 +92,18 @@ public final class MainActivity extends Activity {
     }
 
     private void performNetworkProbe(TextView target, int sequence) {
-        String transport = activeTransport();
         for (int attempt = 1; attempt <= 2; attempt++) {
             long started = SystemClock.elapsedRealtime();
+            String transport = "UNKNOWN";
             try {
                 ConnectivityManager manager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
                 Network activeNetwork = manager == null ? null : manager.getActiveNetwork();
                 if (activeNetwork == null) {
                     throw new IOException("No active Android network for the HTTPS probe");
+                }
+                transport = transportForNetwork(activeNetwork);
+                if (!"CELLULAR".equals(transport) && !"ETHERNET".equals(transport)) {
+                    throw new IllegalStateException("Unsupported transport for emulator-console shaping: " + transport);
                 }
                 ProbeResult result = performPinnedHttpsProbe(activeNetwork, PROBE_URL, BuildConfig.PROBE_IP, PROBE_BYTES, started);
                 long duration = SystemClock.elapsedRealtime() - started;
@@ -306,7 +310,12 @@ public final class MainActivity extends Activity {
     private String activeTransport() {
         ConnectivityManager manager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         Network active = manager == null ? null : manager.getActiveNetwork();
-        NetworkCapabilities caps = manager == null || active == null ? null : manager.getNetworkCapabilities(active);
+        return transportForNetwork(active);
+    }
+
+    private String transportForNetwork(Network network) {
+        ConnectivityManager manager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        NetworkCapabilities caps = manager == null || network == null ? null : manager.getNetworkCapabilities(network);
         if (caps == null) return "UNKNOWN";
         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return "CELLULAR";
         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return "ETHERNET";
