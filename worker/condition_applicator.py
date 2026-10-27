@@ -237,10 +237,13 @@ def apply_storage_pressure(
 
     if initial_free <= target_free_mb:
         return {
-            "apply_status": "applied",
+            # The target state already exists. Do not claim BharatSim applied
+            # pressure when it did not write any bytes to the device.
+            "apply_status": "already_satisfied",
             "verification_status": "verified",
+            "condition_state": "preexisting_target_satisfied",
             "target_reached": True,
-            "bounded_pressure_applied": True,
+            "bounded_pressure_applied": False,
             "allocated_mb": 0,
             "requested_target_mb": target_free_mb,
             "actual_achieved_free_mb": initial_free,
@@ -838,6 +841,12 @@ class ConditionManager:
             for c in requested_conditions
             if c["apply_status"] == "partially_applied"
         ]
+        preexisting_conditions = [
+            c
+            for c in requested_conditions
+            if c["apply_status"] == "already_satisfied"
+            and c["verification_status"] == "verified"
+        ]
         unsupported_conditions = [
             c
             for c in requested_conditions
@@ -858,9 +867,13 @@ class ConditionManager:
             overall_status = "none_requested"
         elif failed_conditions:
             overall_status = "partial_failure"
-        elif partially_applied and fully_applied_verified:
+        elif preexisting_conditions and len(preexisting_conditions) == len(requested_conditions):
+            overall_status = "already_satisfied"
+        elif (partially_applied or preexisting_conditions) and (fully_applied_verified or unsupported_conditions):
             overall_status = "partially_applied_and_verified"
         elif partially_applied and not fully_applied_verified:
+            overall_status = "partially_applied"
+        elif preexisting_conditions:
             overall_status = "partially_applied"
         elif unsupported_conditions and fully_applied_verified:
             overall_status = "partially_applied_and_verified"
@@ -891,6 +904,7 @@ class ConditionManager:
             "traffic_path_verified": False,
             "applied_conditions_count": len(fully_applied_verified),
             "partially_applied_conditions_count": len(partially_applied),
+            "preexisting_conditions_count": len(preexisting_conditions),
             "conditions": self.condition_records,
             "cleanup": self.cleanup_records or {"status": "pending", "verified": False},
             "note": (
