@@ -5,42 +5,57 @@ from worker.tests import appium_smoke_journey as journey
 
 
 class SupportedRoutePreflightTests(unittest.TestCase):
-    def test_preflight_requires_a_default_route(self):
-        commands = [
-            "", "", "", "", "", "",  # airplane/mobile data, service, GSM, Wi-Fi setup
-            "default via 10.0.2.2 dev rmnet_data0",
-            "Active default network: CELLULAR; NET_CAPABILITY_INTERNET",
-            "gsm voice state: home\ngsm data state: home",
-        ]
-        with patch.object(journey, "adb", side_effect=commands) as adb_call, patch.object(journey.time, "sleep"):
+    def _fake_adb(self, connectivity):
+        def run(*args, **kwargs):
+            command = tuple(args)
+            if command == ("shell", "ip", "route", "show", "table", "all"):
+                return "default via 10.0.2.2 dev rmnet_data0"
+            if command == ("shell", "ip", "-6", "route", "show", "table", "all"):
+                return ""
+            if command == ("shell", "ip", "rule", "show"):
+                return "0: from all lookup local"
+            if command == ("shell", "dumpsys", "connectivity"):
+                return connectivity
+            if command == ("emu", "gsm", "status"):
+                return "gsm voice state: home\ngsm data state: home"
+            return ""
+        return run
+
+    def test_preflight_accepts_active_cellular_network(self):
+        with patch.object(
+            journey, "adb",
+            side_effect=self._fake_adb("Cellular active networks: {100}"),
+        ) as adb_call, patch.object(journey.time, "sleep"):
             journey.prepare_supported_transport()
-        self.assertEqual(adb_call.call_count, 9)
+        self.assertTrue(any(call.args[:3] == ("shell", "dumpsys", "connectivity") for call in adb_call.call_args_list))
+        self.assertTrue(any(call.args[:3] == ("shell", "cmd", "connectivity") for call in adb_call.call_args_list))
 
-
-    def test_preflight_accepts_shapeable_ethernet_route(self):
-        commands = [
-            "", "", "", "", "", "",
-            "default via 10.0.2.1 dev eth0",
-            "Active default network: ETHERNET; NET_CAPABILITY_INTERNET",
-            "gsm voice state: home\ngsm data state: home",
-        ]
-        with patch.object(journey, "adb", side_effect=commands) as adb_call, patch.object(journey.time, "sleep"):
-            journey.prepare_supported_transport()
-        self.assertEqual(adb_call.call_count, 9)
-
-    def test_preflight_fails_with_diagnostics_when_no_route_exists(self):
-        commands = [
-            "", "", "", "", "", "",  # setup commands
-            "", "No active default network", "gsm voice state: home\ngsm data state: home",
-        ]
-        with (
-            patch.object(journey, "adb", side_effect=commands),
-            patch.object(journey.time, "sleep"),
-            patch.object(journey.time, "monotonic", side_effect=[0, *range(0, 23)]),
+    def test_preflight_accepts_active_ethernet_network(self):
+        with patch.object(
+            journey, "adb",
+            side_effect=self._fake_adb("Ethernet active networks: {101}"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "no verified cellular/Ethernet default route") as error:
+            journey.prepare_supported_transport()
+
+    def test_preflight_rejects_wifi_only(self):
+        self.assertFalse(journey.has_supported_active_transport(
+            "WiFi active networks: {100}\nCellular active networks: {}\nEthernet active networks: {}"
+        ))
+
+    def test_preflight_fails_with_diagnostics_when_no_supported_network_exists(self):
+        with (
+            patch.object(
+                journey, "adb",
+                side_effect=self._fake_adb(
+                    "WiFi active networks: {100}\nCellular active networks: {}\nEthernet active networks: {}"
+                ),
+            ),
+            patch.object(journey.time, "sleep"),
+            patch.object(journey.time, "monotonic", side_effect=[0, *range(0, 32)]),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no active supported cellular/Ethernet network") as error:
                 journey.prepare_supported_transport()
-        self.assertIn("route=", str(error.exception))
+        self.assertIn("IPv4 routes=", str(error.exception))
         self.assertIn("connectivity=", str(error.exception))
 
 
