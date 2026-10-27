@@ -143,10 +143,12 @@ public final class MainActivity extends Activity {
         // hostname so SNI and the normal certificate hostname verifier remain active.
         Log.i(TAG, "BHARATSIM_NETWORK_PROBE request_started endpoint_host=" + host + " endpoint_ip=" + pinnedIp);
         try (Socket raw = new Socket()) {
-            raw.connect(new InetSocketAddress(InetAddress.getByName(pinnedIp), port), 3000);
+            raw.connect(new InetSocketAddress(InetAddress.getByName(pinnedIp), port), 8000);
             try (SSLSocket tls = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault())
                     .createSocket(raw, host, port, true)) {
-                tls.setSoTimeout(8000);
+                // A 500 KB sample can take several seconds on a 1 Mbps shaped route; allow
+                // headroom for TLS/header delays while keeping the read bounded.
+                tls.setSoTimeout(30000);
                 tls.startHandshake();
                 Log.i(TAG, "BHARATSIM_NETWORK_PROBE tls_handshake_completed endpoint_host=" + host);
                 if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(host, tls.getSession())) {
