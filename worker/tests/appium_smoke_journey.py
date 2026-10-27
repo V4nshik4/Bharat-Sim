@@ -79,26 +79,23 @@ def prepare_supported_transport() -> None:
             last_rules = adb("shell", "ip", "rule", "show", timeout=5)
             last_connectivity = adb("shell", "dumpsys", "connectivity", timeout=8)
             last_gsm = adb("emu", "gsm", "status", timeout=5)
-            default_routes = [
-                line.strip()
-                for line in last_route.splitlines()
-                if line.strip().split() and line.strip().split()[0] == "default"
-            ]
-            supported_route = any(
-                re.search(r"\\bdev\\s+(?!wlan|wifi)(\\S+)", line, re.I)
-                for line in default_routes
-            )
-            supported_transport = any(
-                transport in last_connectivity.upper() for transport in ("CELLULAR", "ETHERNET")
-            )
-            if supported_route and supported_transport:
+            # Android's per-network policy routes are not always visible in the
+            # main route table. Require an active supported network here; the
+            # Network-bound HTTPS transfer below is the final route/data-plane proof.
+            active_cellular = bool(re.search(
+                r"Cellular active networks:\\s*\\{[^}]+\\}", last_connectivity, re.I
+            ))
+            active_ethernet = bool(re.search(
+                r"Ethernet active networks:\\s*\\{[^}]+\\}", last_connectivity, re.I
+            ))
+            if active_cellular or active_ethernet:
                 return
         except Exception as exc:
             last_gsm = f"preflight command failed: {exc}"
         time.sleep(1)
 
     raise RuntimeError(
-        "Android emulator has no verified IPv4 default route on a supported cellular/Ethernet path; "
+        "Android emulator has no active supported cellular/Ethernet network; "
         "refusing to call a failed/no-route request a network-shaping measurement. "
         f"gsm={last_gsm[-1200:]!r}; IPv4 routes={last_route[-2500:]!r}; "
         f"IPv6 routes={last_route6[-2500:]!r}; rules={last_rules[-2500:]!r}; "
