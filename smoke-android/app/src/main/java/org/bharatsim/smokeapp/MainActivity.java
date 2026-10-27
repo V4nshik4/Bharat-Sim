@@ -96,7 +96,12 @@ public final class MainActivity extends Activity {
         for (int attempt = 1; attempt <= 2; attempt++) {
             long started = SystemClock.elapsedRealtime();
             try {
-                ProbeResult result = performPinnedHttpsProbe(PROBE_URL, BuildConfig.PROBE_IP, PROBE_BYTES, started);
+                ConnectivityManager manager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+                Network activeNetwork = manager == null ? null : manager.getActiveNetwork();
+                if (activeNetwork == null) {
+                    throw new IOException("No active Android network for the HTTPS probe");
+                }
+                ProbeResult result = performPinnedHttpsProbe(activeNetwork, PROBE_URL, BuildConfig.PROBE_IP, PROBE_BYTES, started);
                 long duration = SystemClock.elapsedRealtime() - started;
                 Log.i(TAG, "BHARATSIM_NETWORK_PROBE status=HTTP_" + result.statusCode + " duration_ms=" + duration
                         + " transport=" + transport + " probe=" + sequence
@@ -130,7 +135,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static ProbeResult performPinnedHttpsProbe(String urlText, String pinnedIp, int expectedBytes, long startedAt) throws IOException {
+    private static ProbeResult performPinnedHttpsProbe(Network activeNetwork, String urlText, String pinnedIp, int expectedBytes, long startedAt) throws IOException {
         URL url = new URL(urlText);
         if (!"https".equalsIgnoreCase(url.getProtocol()) || pinnedIp.equals("0.0.0.0")) {
             throw new IOException("HTTPS probe URL and pinned IPv4 address are required");
@@ -142,7 +147,9 @@ public final class MainActivity extends Activity {
         // Connect to the CI-resolved numeric IP directly. Layer TLS using the
         // hostname so SNI and the normal certificate hostname verifier remain active.
         Log.i(TAG, "BHARATSIM_NETWORK_PROBE request_started endpoint_host=" + host + " endpoint_ip=" + pinnedIp);
-        try (Socket raw = new Socket()) {
+        // Bind the socket to the Network whose transport is reported below. A generic
+        // Socket() can bypass Android's per-network policy-routing table in emulators.
+        try (Socket raw = activeNetwork.getSocketFactory().createSocket()) {
             raw.connect(new InetSocketAddress(InetAddress.getByName(pinnedIp), port), 8000);
             try (SSLSocket tls = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault())
                     .createSocket(raw, host, port, true)) {
