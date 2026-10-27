@@ -51,6 +51,14 @@ def adb(*args: str, timeout: int = 20) -> str:
     return output
 
 
+def has_supported_active_transport(connectivity: str) -> bool:
+    """Recognize only active cellular/Ethernet networks in Android dumpsys output."""
+    return bool(
+        re.search(r"Cellular active networks:\s*\{[^}]+\}", connectivity, re.I)
+        or re.search(r"Ethernet active networks:\s*\{[^}]+\}", connectivity, re.I)
+    )
+
+
 def prepare_supported_transport() -> None:
     """Establish a real route that Android Emulator console shaping supports.
 
@@ -82,13 +90,7 @@ def prepare_supported_transport() -> None:
             # Android's per-network policy routes are not always visible in the
             # main route table. Require an active supported network here; the
             # Network-bound HTTPS transfer below is the final route/data-plane proof.
-            active_cellular = bool(re.search(
-                r"Cellular active networks:\s*\{[^}]+\}", last_connectivity, re.I
-            ))
-            active_ethernet = bool(re.search(
-                r"Ethernet active networks:\s*\{[^}]+\}", last_connectivity, re.I
-            ))
-            if active_cellular or active_ethernet:
+            if has_supported_active_transport(last_connectivity):
                 return
         except Exception as exc:
             last_gsm = f"preflight command failed: {exc}"
