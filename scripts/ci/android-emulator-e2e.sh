@@ -37,6 +37,7 @@ cleanup() {
   [ -z "$APPIUM_PID" ] || kill "$APPIUM_PID" 2>/dev/null || true
   [ -z "$WORKER_PID" ] || kill "$WORKER_PID" 2>/dev/null || true
   [ -z "$API_PID" ] || kill "$API_PID" 2>/dev/null || true
+  rm -f "$RUNNER_TEMP/alternate-signing.jks" "$RUNNER_TEMP/alternate-signing.jks.old"
 }
 trap cleanup EXIT
 
@@ -190,12 +191,12 @@ command -v keytool
 command -v apksigner
 adb install smoke-android/app/build/outputs/apk/debug/app-debug.apk
 keytool -genkeypair -noprompt \
-  -keystore artifacts/alternate-signing.jks \
+  -keystore "$RUNNER_TEMP/alternate-signing.jks" \
   -storepass bharatsim-ci-only -keypass bharatsim-ci-only \
   -alias bharatsim-negative -keyalg RSA -keysize 2048 -validity 2 \
   -dname "CN=BharatSim CI Install Failure Fixture"
 apksigner sign \
-  --ks artifacts/alternate-signing.jks \
+  --ks "$RUNNER_TEMP/alternate-signing.jks" \
   --ks-key-alias bharatsim-negative \
   --ks-pass pass:bharatsim-ci-only \
   --key-pass pass:bharatsim-ci-only \
