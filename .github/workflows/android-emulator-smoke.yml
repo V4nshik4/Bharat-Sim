@@ -158,6 +158,10 @@ jobs:
           for path in sorted(root.rglob("*")):
               if not path.is_file() or path.name == "evidence-manifest.json":
                   continue
+              if path.suffix.lower() in {".jks", ".keystore", ".p12", ".pfx"}:
+                  raise SystemExit(
+                      f"Refusing to publish signing-key material in CI evidence: {path.relative_to(root)}"
+                  )
               digest = hashlib.sha256()
               with path.open("rb") as stream:
                   for chunk in iter(lambda: stream.read(1024 * 1024), b""):
