@@ -35,6 +35,9 @@ public final class MainActivity extends Activity {
     private static final String TAG = "BharatSimNetworkProbe";
     private static final String PROBE_URL = BuildConfig.PROBE_URL;
     private static final int PROBE_BYTES = 500_000;
+    private static final int MAX_HTTP_LINE_BYTES = 8_192;
+    private static final int MAX_HTTP_HEADER_COUNT = 100;
+    private static final int MAX_HTTP_HEADER_BYTES = 32_768;
     private int probeSequence = 0;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -195,7 +198,16 @@ public final class MainActivity extends Activity {
                 Log.i(TAG, "BHARATSIM_NETWORK_PROBE response_headers_received status=HTTP_" + statusCode);
                 Map<String, String> headers = new HashMap<>();
                 String headerLine;
-                while (!(headerLine = readHttpLine(input)).isEmpty()) {
+                int headerCount = 0;
+                int headerBytes = 0;
+                while (true) {
+                    headerLine = readHttpLine(input);
+                    if (headerLine.isEmpty()) break;
+                    headerCount++;
+                    headerBytes += headerLine.length();
+                    if (headerCount > MAX_HTTP_HEADER_COUNT || headerBytes > MAX_HTTP_HEADER_BYTES) {
+                        throw new IOException("HTTP response headers exceed configured limits");
+                    }
                     int colon = headerLine.indexOf(':');
                     if (colon > 0) {
                         headers.put(headerLine.substring(0, colon).trim().toLowerCase(Locale.ROOT),
@@ -250,7 +262,16 @@ public final class MainActivity extends Activity {
                 throw new IOException("Malformed HTTP chunk size: " + sizeLine, badChunk);
             }
             if (chunkSize == 0) {
-                while (!readHttpLine(input).isEmpty()) { /* consume trailers */ }
+                int trailerCount = 0;
+                int trailerBytes = 0;
+                String trailer;
+                while (!(trailer = readHttpLine(input)).isEmpty()) {
+                    trailerCount++;
+                    trailerBytes += trailer.length();
+                    if (trailerCount > MAX_HTTP_HEADER_COUNT || trailerBytes > MAX_HTTP_HEADER_BYTES) {
+                        throw new IOException("HTTP chunk trailers exceed configured limits");
+                    }
+                }
                 break;
             }
             int remaining = Math.min(chunkSize, expectedBytes - total);
@@ -291,6 +312,9 @@ public final class MainActivity extends Activity {
             if (previous == '\r' && current == '\n') {
                 byte[] bytes = line.toByteArray();
                 return new String(bytes, 0, Math.max(0, bytes.length - 1), StandardCharsets.US_ASCII);
+            }
+            if (line.size() >= MAX_HTTP_LINE_BYTES) {
+                throw new IOException("HTTP line exceeds " + MAX_HTTP_LINE_BYTES + " bytes");
             }
             line.write(current);
             previous = current;
