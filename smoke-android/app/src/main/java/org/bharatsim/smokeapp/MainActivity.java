@@ -255,7 +255,7 @@ public final class MainActivity extends Activity {
         int total = 0;
         byte[] buffer = new byte[8192];
         while (total < expectedBytes) {
-            String sizeLine = readHttpLine(tls, input, deadlineAt);
+            String sizeLine = readHttpLine(socket, input, deadlineAt);
             int semicolon = sizeLine.indexOf(';');
             String sizeText = (semicolon >= 0 ? sizeLine.substring(0, semicolon) : sizeLine).trim();
             final int chunkSize;
@@ -268,7 +268,7 @@ public final class MainActivity extends Activity {
                 int trailerCount = 0;
                 int trailerBytes = 0;
                 String trailer;
-                while (!(trailer = readHttpLine(tls, input, deadlineAt)).isEmpty()) {
+                while (!(trailer = readHttpLine(socket, input, deadlineAt)).isEmpty()) {
                     trailerCount++;
                     trailerBytes += trailer.length();
                     if (trailerCount > MAX_HTTP_HEADER_COUNT || trailerBytes > MAX_HTTP_HEADER_BYTES) {
@@ -288,7 +288,7 @@ public final class MainActivity extends Activity {
             total += chunkRead;
             logTransferProgress(total, expectedBytes, startedAt);
             if (chunkRead < chunkSize || total == expectedBytes) break;
-            if (!readHttpLine(tls, input, deadlineAt).isEmpty()) {
+            if (!readHttpLine(socket, input, deadlineAt).isEmpty()) {
                 throw new IOException("Malformed HTTP chunk terminator");
             }
         }
