@@ -35,6 +35,7 @@ public final class MainActivity extends Activity {
     private static final String TAG = "BharatSimNetworkProbe";
     private static final String PROBE_URL = BuildConfig.PROBE_URL;
     private static final int PROBE_BYTES = 500_000;
+    private static final int PROBE_TIMEOUT_MS = 45_000;
     private static final int MAX_HTTP_LINE_BYTES = 8_192;
     private static final int MAX_HTTP_HEADER_COUNT = 100;
     private static final int MAX_HTTP_HEADER_BYTES = 32_768;
@@ -95,6 +96,7 @@ public final class MainActivity extends Activity {
     }
 
     private void performNetworkProbe(TextView target, int sequence) {
+        final long probeDeadline = SystemClock.elapsedRealtime() + PROBE_TIMEOUT_MS;
         for (int attempt = 1; attempt <= 2; attempt++) {
             long started = SystemClock.elapsedRealtime();
             String transport = "UNKNOWN";
@@ -108,7 +110,7 @@ public final class MainActivity extends Activity {
                 if (!"CELLULAR".equals(transport) && !"ETHERNET".equals(transport)) {
                     throw new IllegalStateException("Unsupported transport for emulator-console shaping: " + transport);
                 }
-                ProbeResult result = performPinnedHttpsProbe(activeNetwork, PROBE_URL, BuildConfig.PROBE_IP, PROBE_BYTES, started);
+                ProbeResult result = performPinnedHttpsProbe(activeNetwork, PROBE_URL, BuildConfig.PROBE_IP, PROBE_BYTES, started, probeDeadline);
                 long duration = SystemClock.elapsedRealtime() - started;
                 Log.i(TAG, "BHARATSIM_NETWORK_PROBE status=HTTP_" + result.statusCode + " duration_ms=" + duration
                         + " transport=" + transport + " probe=" + sequence
@@ -119,7 +121,7 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> target.setText(message));
                 return;
             } catch (Exception exception) {
-                if (exception instanceof IOException && attempt < 2) {
+                if (exception instanceof IOException && attempt < 2 && SystemClock.elapsedRealtime() < probeDeadline) {
                     Log.w(TAG, "BHARATSIM_NETWORK_PROBE retrying sequence=" + sequence
                             + " attempt=" + attempt + " after=" + exception.getClass().getSimpleName(), exception);
                     try {
@@ -142,7 +144,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static ProbeResult performPinnedHttpsProbe(Network activeNetwork, String urlText, String pinnedIp, int expectedBytes, long startedAt) throws IOException {
+    private static ProbeResult performPinnedHttpsProbe(Network activeNetwork, String urlText, String pinnedIp, int expectedBytes, long startedAt, long deadlineAt) throws IOException {
         URL url = new URL(urlText);
         if (!"https".equalsIgnoreCase(url.getProtocol()) || pinnedIp.equals("0.0.0.0")) {
             throw new IOException("HTTPS probe URL and pinned IPv4 address are required");
@@ -157,12 +159,12 @@ public final class MainActivity extends Activity {
         // Bind the socket to the Network whose transport is reported below. A generic
         // Socket() can bypass Android's per-network policy-routing table in emulators.
         try (Socket raw = activeNetwork.getSocketFactory().createSocket()) {
-            raw.connect(new InetSocketAddress(InetAddress.getByName(pinnedIp), port), 8000);
+            raw.connect(new InetSocketAddress(InetAddress.getByName(pinnedIp), port), Math.min(8000, remainingTimeoutMs(deadlineAt)));
             try (SSLSocket tls = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault())
                     .createSocket(raw, host, port, true)) {
                 // A 500 KB sample can take several seconds on a 1 Mbps shaped route; allow
                 // headroom for TLS/header delays while keeping the read bounded.
-                tls.setSoTimeout(30000);
+                tls.setSoTimeout(remainingTimeoutMs(deadlineAt));
                 tls.startHandshake();
                 Log.i(TAG, "BHARATSIM_NETWORK_PROBE tls_handshake_completed endpoint_host=" + host);
                 if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(host, tls.getSession())) {
@@ -180,7 +182,7 @@ public final class MainActivity extends Activity {
                 output.flush();
 
                 InputStream input = tls.getInputStream();
-                String statusLine = readHttpLine(input);
+                String statusLine = readHttpLine(tls, input, deadlineAt);
                 String[] statusParts = statusLine.split(" ", 3);
                 if (statusParts.length < 2 || !statusParts[0].startsWith("HTTP/")) {
                     throw new IOException("Malformed HTTP status line: " + statusLine);
@@ -201,7 +203,7 @@ public final class MainActivity extends Activity {
                 int headerCount = 0;
                 int headerBytes = 0;
                 while (true) {
-                    headerLine = readHttpLine(input);
+                    headerLine = readHttpLine(tls, input, deadlineAt);
                     if (headerLine.isEmpty()) break;
                     headerCount++;
                     headerBytes += headerLine.length();
@@ -226,8 +228,8 @@ public final class MainActivity extends Activity {
                     }
                 }
                 int bytesRead = transferEncoding.contains("chunked")
-                        ? readChunkedBody(input, expectedBytes, startedAt)
-                        : readFixedBody(input, expectedBytes, startedAt);
+                        ? readChunkedBody(tls, input, expectedBytes, startedAt, deadlineAt)
+                        : readFixedBody(tls, input, expectedBytes, startedAt, deadlineAt);
                 if (bytesRead != expectedBytes) {
                     throw new IOException("Expected " + expectedBytes + " probe bytes, received " + bytesRead);
                 }
@@ -236,10 +238,11 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static int readFixedBody(InputStream input, int expectedBytes, long startedAt) throws IOException {
+    private static int readFixedBody(SSLSocket socket, InputStream input, int expectedBytes, long startedAt, long deadlineAt) throws IOException {
         byte[] buffer = new byte[8192];
         int total = 0;
         while (total < expectedBytes) {
+            socket.setSoTimeout(remainingTimeoutMs(deadlineAt));
             int count = input.read(buffer, 0, Math.min(buffer.length, expectedBytes - total));
             if (count < 0) break;
             total += count;
@@ -248,11 +251,11 @@ public final class MainActivity extends Activity {
         return total;
     }
 
-    private static int readChunkedBody(InputStream input, int expectedBytes, long startedAt) throws IOException {
+    private static int readChunkedBody(SSLSocket socket, InputStream input, int expectedBytes, long startedAt, long deadlineAt) throws IOException {
         int total = 0;
         byte[] buffer = new byte[8192];
         while (total < expectedBytes) {
-            String sizeLine = readHttpLine(input);
+            String sizeLine = readHttpLine(tls, input, deadlineAt);
             int semicolon = sizeLine.indexOf(';');
             String sizeText = (semicolon >= 0 ? sizeLine.substring(0, semicolon) : sizeLine).trim();
             final int chunkSize;
@@ -265,7 +268,7 @@ public final class MainActivity extends Activity {
                 int trailerCount = 0;
                 int trailerBytes = 0;
                 String trailer;
-                while (!(trailer = readHttpLine(input)).isEmpty()) {
+                while (!(trailer = readHttpLine(tls, input, deadlineAt)).isEmpty()) {
                     trailerCount++;
                     trailerBytes += trailer.length();
                     if (trailerCount > MAX_HTTP_HEADER_COUNT || trailerBytes > MAX_HTTP_HEADER_BYTES) {
@@ -277,6 +280,7 @@ public final class MainActivity extends Activity {
             int remaining = Math.min(chunkSize, expectedBytes - total);
             int chunkRead = 0;
             while (chunkRead < remaining) {
+                socket.setSoTimeout(remainingTimeoutMs(deadlineAt));
                 int count = input.read(buffer, 0, Math.min(buffer.length, remaining - chunkRead));
                 if (count < 0) return total + chunkRead;
                 chunkRead += count;
@@ -284,7 +288,7 @@ public final class MainActivity extends Activity {
             total += chunkRead;
             logTransferProgress(total, expectedBytes, startedAt);
             if (chunkRead < chunkSize || total == expectedBytes) break;
-            if (!readHttpLine(input).isEmpty()) {
+            if (!readHttpLine(tls, input, deadlineAt).isEmpty()) {
                 throw new IOException("Malformed HTTP chunk terminator");
             }
         }
@@ -300,10 +304,19 @@ public final class MainActivity extends Activity {
                 + " throughput_bytes_per_second=" + bytesPerSecond);
     }
 
-    private static String readHttpLine(InputStream input) throws IOException {
+    private static int remainingTimeoutMs(long deadlineAt) throws IOException {
+        long remaining = deadlineAt - SystemClock.elapsedRealtime();
+        if (remaining <= 0) {
+            throw new java.net.SocketTimeoutException("Android HTTPS probe exceeded its 45-second overall deadline");
+        }
+        return (int) Math.max(1, Math.min(Integer.MAX_VALUE, remaining));
+    }
+
+    private static String readHttpLine(SSLSocket socket, InputStream input, long deadlineAt) throws IOException {
         ByteArrayOutputStream line = new ByteArrayOutputStream();
         int previous = -1;
         while (true) {
+            socket.setSoTimeout(remainingTimeoutMs(deadlineAt));
             int current = input.read();
             if (current < 0) {
                 if (line.size() == 0) return "";
