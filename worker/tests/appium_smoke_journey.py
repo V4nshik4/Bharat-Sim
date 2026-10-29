@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 BASE = "http://127.0.0.1:4723"
 ADB_SERIAL = "emulator-5554"
-PROBE_BYTES = 2_000_000
+PROBE_BYTES = 500_000
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 PROBE_RE = re.compile(r"HTTP (200|206) · (\d+) ms · (CELLULAR|ETHERNET|WIFI|UNKNOWN|OTHER) · probe (\d+) · bytes (\d+) · attempts (\d+)")
 
@@ -51,13 +51,60 @@ def adb(*args: str, timeout: int = 20) -> str:
     return output
 
 
-def prepare_cellular_transport() -> None:
-    """Attach the emulator's simulated cellular data route before measuring its profile."""
+def has_supported_active_transport(connectivity: str) -> bool:
+    """Recognize only active cellular/Ethernet networks in Android dumpsys output."""
+    return bool(
+        re.search(r"Cellular active networks:\s*\{[^}]+\}", connectivity, re.I)
+        or re.search(r"Ethernet active networks:\s*\{[^}]+\}", connectivity, re.I)
+    )
+
+
+def prepare_supported_transport() -> None:
+    """Establish a real route that Android Emulator console shaping supports.
+
+    Android may install routes in per-network policy tables. Inspect all IPv4
+    tables before failing the preflight; the actual HTTPS probe remains the
+    final data-plane check. Wi-Fi is excluded because emulator-console shaping
+    does not cover modern Wi-Fi traffic.
+    """
+    adb("shell", "settings", "put", "global", "airplane_mode_on", "0")
+    # The global setting alone does not guarantee the framework has processed the radio state.
+    adb("shell", "cmd", "connectivity", "airplane-mode", "disable")
+    adb("shell", "settings", "put", "global", "mobile_data", "1")
+    adb("shell", "cmd", "phone", "data", "enable")
     adb("emu", "gsm", "voice", "home")
     adb("emu", "gsm", "data", "home")
     adb("shell", "svc", "wifi", "disable")
-    adb("shell", "svc", "data", "enable")
-    time.sleep(5)
+
+    deadline = time.monotonic() + 30
+    last_route = ""
+    last_route6 = ""
+    last_rules = ""
+    last_connectivity = ""
+    last_gsm = ""
+    while time.monotonic() < deadline:
+        try:
+            last_route = adb("shell", "ip", "route", "show", "table", "all", timeout=5)
+            last_route6 = adb("shell", "ip", "-6", "route", "show", "table", "all", timeout=5)
+            last_rules = adb("shell", "ip", "rule", "show", timeout=5)
+            last_connectivity = adb("shell", "dumpsys", "connectivity", timeout=8)
+            last_gsm = adb("emu", "gsm", "status", timeout=5)
+            # Android's per-network policy routes are not always visible in the
+            # main route table. Require an active supported network here; the
+            # Network-bound HTTPS transfer below is the final route/data-plane proof.
+            if has_supported_active_transport(last_connectivity):
+                return
+        except Exception as exc:
+            last_gsm = f"preflight command failed: {exc}"
+        time.sleep(1)
+
+    raise RuntimeError(
+        "Android emulator has no active supported cellular/Ethernet network; "
+        "refusing to call a failed/no-route request a network-shaping measurement. "
+        f"gsm={last_gsm[-1200:]!r}; IPv4 routes={last_route[-2500:]!r}; "
+        f"IPv6 routes={last_route6[-2500:]!r}; rules={last_rules[-2500:]!r}; "
+        f"connectivity={last_connectivity[-4000:]!r}"
+    )
 
 
 def speed_limits_bps(speed: str) -> tuple[int, int]:
@@ -202,8 +249,22 @@ def parse_probe_text(text: str) -> dict[str, object] | None:
     }
 
 
-# A 500 KB fixture transfer should complete well below this bound, even under EDGE throttling.
-def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: int = 60) -> dict:
+# Each fixture probe transfers 500 KB. The 1 Mbps bandwidth profile needs about 4 seconds
+# for payload bytes alone; the device socket has a 30-second bounded read timeout to tolerate
+# real endpoint/TLS variation without treating an incomplete transfer as a measurement.
+def network_probe_log_tail() -> str:
+    """Return real device-side probe diagnostics when a UI wait fails."""
+    try:
+        return adb(
+            "logcat", "-d", "-t", "1000", "-s",
+            "BharatSimNetworkProbe:I", "BharatSimNetworkProbe:W",
+            "BharatSimNetworkProbe:E", "*:S", timeout=10,
+        )[-6000:]
+    except Exception as exc:
+        return f"Could not collect device probe logcat: {exc}"
+
+
+def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: int = 120) -> dict:
     deadline = time.monotonic() + timeout
     last_text = ""
     while time.monotonic() < deadline:
@@ -214,9 +275,9 @@ def wait_for_probe(session: str, element_id: str, after_sequence: int, timeout: 
                 raise RuntimeError(f"Fixture downloaded unexpected payload size: {probe['bytes_read']}")
             return probe
         if "probe failed" in last_text.lower() or "returned http" in last_text.lower():
-            raise RuntimeError(f"Fixture network probe failed: {last_text}")
+            raise RuntimeError(f"Fixture network probe failed: {last_text}\\nDevice probe logcat:\\n{network_probe_log_tail()}")
         time.sleep(0.5)
-    raise RuntimeError(f"Fixture network probe did not complete within {timeout}s: {last_text!r}")
+    raise RuntimeError(f"Fixture network probe did not complete within {timeout}s: {last_text!r}\\nDevice probe logcat:\\n{network_probe_log_tail()}")
 
 
 def main() -> int:
@@ -228,8 +289,8 @@ def main() -> int:
     phase = "configure_baseline_profile"
     evidence: dict[str, object] = {}
     try:
-        phase = "prepare_cellular_transport"
-        prepare_cellular_transport()
+        phase = "prepare_supported_transport"
+        prepare_supported_transport()
         phase = "configure_baseline_profile"
         baseline_profile = set_network_profile(None, "full")
         evidence["baseline_profile"] = baseline_profile
@@ -273,8 +334,8 @@ def main() -> int:
                 if status != "Primary action completed":
                     raise RuntimeError(f"Primary action state assertion failed during {label}: {status!r}")
                 probe = wait_for_probe(session_id, probe_id, after_sequence=last_sequence)
-                if probe["transport"] != "CELLULAR":
-                    raise RuntimeError(f"{label} request did not use the required simulated cellular transport: {probe}")
+                if probe["transport"] not in ("CELLULAR", "ETHERNET"):
+                    raise RuntimeError(f"{label} request did not use a transport supported by emulator-console shaping (CELLULAR/ETHERNET): {probe}")
                 if expected_transport is not None and probe["transport"] != expected_transport:
                     raise RuntimeError(
                         f"{label} request changed transport from {expected_transport} to {probe['transport']}: {probe}"
@@ -286,8 +347,8 @@ def main() -> int:
         # Exclude one cold-start download from all timing comparisons.
         request("POST", base + f"/element/{action_id}/click", {})
         warmup_probe = wait_for_probe(session_id, probe_id, after_sequence=0)
-        if warmup_probe["transport"] != "CELLULAR":
-            raise RuntimeError(f"Warm-up request did not use the required simulated cellular transport: {warmup_probe}")
+        if warmup_probe["transport"] not in ("CELLULAR", "ETHERNET"):
+            raise RuntimeError(f"Warm-up request did not use a transport supported by emulator-console shaping (CELLULAR/ETHERNET): {warmup_probe}")
         expected_transport = str(warmup_probe["transport"])
         evidence["observed_transport"] = expected_transport
         last_sequence = warmup_probe["sequence"]
@@ -296,11 +357,11 @@ def main() -> int:
         baseline_probes, last_sequence = take_samples("baseline", last_sequence)
         evidence["baseline_probes"] = baseline_probes
 
-        # Test bandwidth immediately after baseline with a custom 8 Mbps cap.
-        # The 2 MB transfer makes the expected throughput effect observable while
-        # avoiding the EDGE radio preset, which stalled the HTTPS request.
+        # Test bandwidth immediately after baseline with a 1 Mbps cap.
+        # A 500 KB transfer makes the throughput effect observable while keeping
+        # each request short enough for bounded retry and timeout handling.
         phase = "configure_bandwidth_profile"
-        bandwidth_profile = set_network_profile(None, "8000:8000")
+        bandwidth_profile = set_network_profile(None, "1000:1000")
         evidence["bandwidth_profile"] = bandwidth_profile
         phase = "bandwidth_samples"
         bandwidth_probes, last_sequence = take_samples("bandwidth-only", last_sequence)
@@ -375,7 +436,7 @@ def main() -> int:
             "status": "passed",
             "package_name": "org.bharatsim.smokeapp",
             "probe_endpoint": os.getenv("BHARATSIM_PROBE_URL", "not-configured"),
-            "probe_endpoint_scope": "Public HTTPS transfer from proof.ovh.net; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the simulated cellular route, verified by Android NetworkCapabilities. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
+            "probe_endpoint_scope": f"Public HTTPS transfer from {expected_host}; the fixture pins the CI-resolved IP while retaining the URL hostname for TLS SNI and certificate verification. The transfer traverses the actual Android emulator Ethernet/cellular route, identified by Android NetworkCapabilities. This verifies the fixture path only, not arbitrary uploaded-app traffic.",
             "probe_payload_bytes": PROBE_BYTES,
             "probe_endpoint_ip": expected_ip,
             "observed_transport": expected_transport,
@@ -385,7 +446,7 @@ def main() -> int:
                 "tap changes the status text to Primary action completed",
                 "each probe downloaded exactly 500,000 bytes from the public HTTPS endpoint through the Android Emulator network stack",
                 "per-request retry counts are captured in probe evidence",
-                "baseline, latency-only, and bandwidth-only probes used the same simulated cellular transport",
+                "baseline, latency-only, and bandwidth-only probes used the same observed Ethernet/cellular transport",
                 "latency-only median duration exceeded baseline by at least 50 ms",
                 "bandwidth-only median duration exceeded baseline by at least 500 ms",
                 "emulator network console readback matched each requested profile",

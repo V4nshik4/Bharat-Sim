@@ -37,6 +37,7 @@ cleanup() {
   [ -z "$APPIUM_PID" ] || kill "$APPIUM_PID" 2>/dev/null || true
   [ -z "$WORKER_PID" ] || kill "$WORKER_PID" 2>/dev/null || true
   [ -z "$API_PID" ] || kill "$API_PID" 2>/dev/null || true
+  rm -f "$RUNNER_TEMP/alternate-signing.jks" "$RUNNER_TEMP/alternate-signing.jks.old"
 }
 trap cleanup EXIT
 
@@ -60,8 +61,45 @@ else:
     raise SystemExit("BharatSim API did not become ready")
 PY
 
-python worker/agent.py > artifacts/worker.log 2>&1 &
+python -m worker.agent > artifacts/worker.log 2>&1 &
 WORKER_PID=$!
+
+# Do not enqueue APKs until the real worker has authenticated and registered.
+# If startup/auth/claim is broken, surface the worker and API logs immediately
+# instead of waiting for the full job timeout with an unexplained queued run.
+python - <<'PY'
+import json
+import time
+import urllib.request
+
+deadline = time.monotonic() + 30
+last = None
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/workers", timeout=3) as response:
+            payload = json.load(response)
+        worker = next((item for item in payload.get("items", []) if item.get("id") == "ci-emulator-worker" and item.get("online")), None)
+        if worker:
+            print("Authenticated worker registered:", json.dumps({k: worker.get(k) for k in ("id", "status", "online", "last_seen")}))
+            break
+        last = payload
+    except Exception as exc:
+        last = repr(exc)
+    time.sleep(1)
+else:
+    print("Worker registration failed; last worker status:", json.dumps(last))
+    print("--- worker.log ---")
+    try:
+        print(open("artifacts/worker.log", errors="replace").read()[-12000:])
+    except OSError as exc:
+        print(exc)
+    print("--- api.log ---")
+    try:
+        print(open("artifacts/api.log", errors="replace").read()[-12000:])
+    except OSError as exc:
+        print(exc)
+    raise SystemExit("Worker failed to authenticate/register before APK upload")
+PY
 
 curl --fail --silent --show-error \
   -F persona_id=baseline \
@@ -88,7 +126,21 @@ while time.monotonic() < deadline:
         break
     time.sleep(2)
 if not final or final["status"] != "completed":
-    raise SystemExit(f"End-to-end worker run did not complete: {final}")
+    print("End-to-end worker run did not complete:", json.dumps(final))
+    print("--- worker.log ---")
+    try:
+        print(Path("artifacts/worker.log").read_text(errors="replace")[-12000:])
+    except OSError as exc:
+        print(exc)
+    print("--- api.log ---")
+    try:
+        print(Path("artifacts/api.log").read_text(errors="replace")[-12000:])
+    except OSError as exc:
+        print(exc)
+    with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/workers", timeout=5) as response:
+        print("--- worker status ---")
+        print(response.read().decode("utf-8", errors="replace"))
+    raise SystemExit("End-to-end worker run did not complete")
 
 result = final.get("result") or {}
 assert result.get("apk_sha256") == uploaded["apk"]["sha256"], "APK evidence hash mismatch"
@@ -139,12 +191,12 @@ command -v keytool
 command -v apksigner
 adb install smoke-android/app/build/outputs/apk/debug/app-debug.apk
 keytool -genkeypair -noprompt \
-  -keystore artifacts/alternate-signing.jks \
+  -keystore "$RUNNER_TEMP/alternate-signing.jks" \
   -storepass bharatsim-ci-only -keypass bharatsim-ci-only \
   -alias bharatsim-negative -keyalg RSA -keysize 2048 -validity 2 \
   -dname "CN=BharatSim CI Install Failure Fixture"
 apksigner sign \
-  --ks artifacts/alternate-signing.jks \
+  --ks "$RUNNER_TEMP/alternate-signing.jks" \
   --ks-key-alias bharatsim-negative \
   --ks-pass pass:bharatsim-ci-only \
   --key-pass pass:bharatsim-ci-only \

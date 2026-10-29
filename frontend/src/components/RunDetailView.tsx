@@ -29,6 +29,24 @@ interface RunDetailViewProps {
   personas: Persona[];
 }
 
+function conditionStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    already_satisfied: "Already satisfied before test (no intervention)",
+    applied_and_verified: "Applied and verified",
+    partially_applied_and_verified: "Partially applied; readback verified",
+    partially_applied: "Partially applied",
+    partial_failure: "Partial failure",
+    unsupported: "Unsupported",
+    unverified: "Unverified",
+    applied: "Applied",
+    failed: "Failed",
+    skipped: "Skipped",
+    verified: "Verified",
+    control_plane_verified: "Control plane verified"
+  };
+  return labels[status] || status.replaceAll("_", " ");
+}
+
 export default function RunDetailView({ personas }: RunDetailViewProps) {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -59,10 +77,13 @@ export default function RunDetailView({ personas }: RunDetailViewProps) {
     void fetchRun(true);
   }, [fetchRun]);
 
-  // Auto-refresh every 5s while status is queued or leased
+  // Auto-refresh while the worker is missing, queued, or actively running.
   useEffect(() => {
     if (!run) return;
-    const isPending = run.status === "queued" || run.status === "leased";
+    const isPending =
+      run.status === "awaiting_worker" ||
+      run.status === "queued" ||
+      run.status === "leased";
     if (!isPending) return;
 
     const interval = window.setInterval(() => {
@@ -445,7 +466,7 @@ export default function RunDetailView({ personas }: RunDetailViewProps) {
                     <div className="evidence-metrics">
                       <span>
                         <small>OVERALL STATUS</small>
-                        <b>{condEvidence.overall_status || "No evidence"}</b>
+                        <b>{condEvidence.overall_status ? conditionStatusLabel(condEvidence.overall_status) : "No evidence"}</b>
                       </span>
                       <span>
                         <small>APPLIED COUNT</small>
@@ -460,6 +481,11 @@ export default function RunDetailView({ personas }: RunDetailViewProps) {
                         <b>{condEvidence.cleanup?.status || "No evidence"}</b>
                       </span>
                     </div>
+                    {(condEvidence.preexisting_conditions_count ?? 0) > 0 && (
+                      <p className="section-desc">
+                        {condEvidence.preexisting_conditions_count} target condition(s) were already satisfied before the run. They were observed and verified, not applied by BharatSim.
+                      </p>
+                    )}
 
                     {condEvidence.conditions && condEvidence.conditions.length > 0 ? (
                       <table className="mini-evidence-table">
@@ -474,7 +500,7 @@ export default function RunDetailView({ personas }: RunDetailViewProps) {
                           {condEvidence.conditions.map((c: ConditionRecord, idx: number) => (
                             <tr key={idx}>
                               <td>{c.condition}</td>
-                              <td>{c.apply_status}</td>
+                              <td>{conditionStatusLabel(c.apply_status)}</td>
                               <td>{c.verification_status}</td>
                             </tr>
                           ))}
