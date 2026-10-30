@@ -256,12 +256,33 @@ export const fallbackPersonas: Persona[] = [
 ];
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(API + path, init);
-  if (!r.ok) {
-    const b = await r.json().catch(() => ({}));
-    throw new Error(b.detail || `Request failed (${r.status})`);
+  try {
+    const r = await fetch(API + path, init);
+    if (!r.ok) {
+      const b = await r.json().catch(() => ({}));
+      throw new Error(b.detail || `Request failed (${r.status})`);
+    }
+    return (await r.json()) as T;
+  } catch (err) {
+    if (
+      err instanceof TypeError &&
+      (err.message.toLowerCase().includes("fetch") ||
+        err.message.toLowerCase().includes("network") ||
+        err.message.toLowerCase().includes("failed"))
+    ) {
+      throw new Error("API is down or unreachable. Could not connect to backend server.");
+    }
+    throw err;
   }
-  return r.json() as Promise<T>;
+}
+
+export function isRunActive(status: string): boolean {
+  return (
+    status === "queued" ||
+    status === "leased" ||
+    status === "running" ||
+    status === "awaiting_worker"
+  );
 }
 
 export function cls(v: string): string {
