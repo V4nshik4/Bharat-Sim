@@ -28,6 +28,7 @@ import {
   demoLog,
   displayRunStatus,
   fallbackPersonas,
+  isRunActive,
   type Analysis,
   type Persona,
   type Run,
@@ -56,6 +57,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [apiStatus, setApiStatus] = useState("checking");
   const [workers, setWorkers] = useState<Worker[]>([]);
+  const [loading, setLoading] = useState(true);
 
   const persona = personas.find((p) => p.id === selected) || fallbackPersonas[0];
 
@@ -65,7 +67,8 @@ export default function App() {
     ? "analysis"
     : "overview";
 
-  async function refresh() {
+  async function refresh(silent = false) {
+    if (!silent) setLoading(true);
     try {
       const [p, r, w] = await Promise.all([
         api<{ items: Persona[] }>("/api/v1/personas"),
@@ -77,19 +80,36 @@ export default function App() {
       setWorkers(w.items);
       setApiStatus("online");
       setError("");
-    } catch {
+    } catch (err) {
       setApiStatus("offline");
       setWorkers([]);
+      setError(
+        err instanceof Error && err.message
+          ? err.message
+          : "API is down or unreachable. Could not connect to backend server."
+      );
+    } finally {
+      if (!silent) setLoading(false);
     }
   }
 
   useEffect(() => {
     void refresh();
     const timer = window.setInterval(() => {
-      void refresh();
+      void refresh(true);
     }, 15000);
     return () => window.clearInterval(timer);
   }, []);
+
+  const hasActiveRun = runs.some((r) => isRunActive(r.status));
+
+  useEffect(() => {
+    if (!hasActiveRun) return;
+    const timer = window.setInterval(() => {
+      void refresh(true);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveRun]);
 
   async function submitApk(e: FormEvent) {
     e.preventDefault();
@@ -276,8 +296,9 @@ export default function App() {
               className="icon-button"
               onClick={() => void refresh()}
               aria-label="Refresh data"
+              disabled={loading}
             >
-              <RefreshCw size={16} />
+              <RefreshCw size={16} className={loading ? "spin" : ""} />
             </button>
             <div className="avatar">BS</div>
           </div>
@@ -479,6 +500,7 @@ export default function App() {
                     selected={selected}
                     setSelected={setSelected}
                     apiStatus={apiStatus}
+                    loading={loading}
                   />
 
                   <UploadPanel
@@ -551,7 +573,18 @@ export default function App() {
                         View all <ArrowUpRight size={13} />
                       </button>
                     </div>
-                    {runs.length === 0 ? (
+                    {loading && runs.length === 0 ? (
+                      <div className="empty-state">
+                        <LoaderCircle className="spin" size={24} />
+                        <b>Loading test runs…</b>
+                        <p>Fetching recent runs from the API.</p>
+                      </div>
+                    ) : apiStatus === "offline" ? (
+                      <div className="alert error-alert" role="alert">
+                        <CircleAlert size={16} />
+                        <span>API is down or unreachable. Unable to load recent runs.</span>
+                      </div>
+                    ) : runs.length === 0 ? (
                       <div className="empty-state">
                         <div className="empty-icon">
                           <Clock3 size={22} />
@@ -615,12 +648,24 @@ export default function App() {
                       className="icon-button"
                       onClick={() => void refresh()}
                       aria-label="Refresh test runs"
+                      disabled={loading}
                     >
-                      <RefreshCw size={15} />
+                      <RefreshCw size={15} className={loading ? "spin" : ""} />
                     </button>
                   </div>
 
-                  {runs.length === 0 ? (
+                  {loading && runs.length === 0 ? (
+                    <div className="empty-state">
+                      <LoaderCircle className="spin" size={28} />
+                      <b>Loading test runs…</b>
+                      <p>Fetching test sessions and execution history from the API.</p>
+                    </div>
+                  ) : apiStatus === "offline" ? (
+                    <div className="alert error-alert" role="alert">
+                      <CircleAlert size={18} />
+                      <span>API is down or unreachable. Unable to load test runs.</span>
+                    </div>
+                  ) : runs.length === 0 ? (
                     <div className="empty-state">
                       <div className="empty-icon">
                         <FlaskConical size={22} />
@@ -665,7 +710,18 @@ export default function App() {
                     )}
                   </div>
 
-                  {!analysis ? (
+                  {busy ? (
+                    <div className="empty-state">
+                      <LoaderCircle className="spin" size={32} />
+                      <b>Analyzing logcat evidence…</b>
+                      <p>Running heuristic signal detection against selected persona profile.</p>
+                    </div>
+                  ) : apiStatus === "offline" ? (
+                    <div className="alert error-alert" role="alert">
+                      <CircleAlert size={18} />
+                      <span>API is down or unreachable. Log analysis service is unavailable.</span>
+                    </div>
+                  ) : !analysis ? (
                     <div className="empty-state">
                       <div className="empty-icon">
                         <FileSearch size={22} />
@@ -735,6 +791,23 @@ export default function App() {
                       </div>
                     </>
                   )}
+                </section>
+              }
+            />
+
+            {/* Fallback not found route */}
+            <Route
+              path="*"
+              element={
+                <section className="panel full-panel">
+                  <div className="empty-state">
+                    <CircleAlert size={32} />
+                    <b>Page not found</b>
+                    <p>The screen you are looking for does not exist.</p>
+                    <button className="secondary-button" onClick={() => navigate("/")}>
+                      Back to overview
+                    </button>
+                  </div>
                 </section>
               }
             />

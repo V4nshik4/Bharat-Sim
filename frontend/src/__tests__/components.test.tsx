@@ -4,7 +4,10 @@ import { createRoot, type Root } from "react-dom/client";
 import UploadPanel from "../components/UploadPanel";
 import ScoreRing from "../components/ScoreRing";
 import FindingCard from "../components/FindingCard";
-import { cls, displayRunStatus, fallbackPersonas } from "../api";
+import PersonaPanel from "../components/PersonaPanel";
+import RunsTable from "../components/RunsTable";
+import { BrowserRouter } from "react-router-dom";
+import { cls, displayRunStatus, fallbackPersonas, isRunActive } from "../api";
 
 describe("api helper utilities", () => {
   it("formats risk classes correctly", () => {
@@ -21,6 +24,16 @@ describe("api helper utilities", () => {
     expect(displayRunStatus("queued")).toBe("queued for worker");
     expect(displayRunStatus("leased")).toBe("worker running");
     expect(displayRunStatus("custom_state")).toBe("custom state");
+  });
+
+  it("identifies active runs for auto-refresh correctly", () => {
+    expect(isRunActive("queued")).toBe(true);
+    expect(isRunActive("leased")).toBe(true);
+    expect(isRunActive("running")).toBe(true);
+    expect(isRunActive("awaiting_worker")).toBe(true);
+    expect(isRunActive("completed")).toBe(false);
+    expect(isRunActive("failed")).toBe(false);
+    expect(isRunActive("timed_out")).toBe(false);
   });
 });
 
@@ -202,5 +215,97 @@ describe("Components tests with jsdom", () => {
       zone.dispatchEvent(new Event("dragleave", { bubbles: true }));
     });
     expect(zone.classList.contains("dragging")).toBe(false);
+  });
+  it("PersonaPanel renders loading state when loading and personas empty", async () => {
+    await act(async () => {
+      root.render(
+        <PersonaPanel
+          personas={[]}
+          selected=""
+          setSelected={vi.fn()}
+          apiStatus="checking"
+          loading={true}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain("Loading test profiles…");
+  });
+
+  it("PersonaPanel renders empty state when not loading and personas empty", async () => {
+    await act(async () => {
+      root.render(
+        <PersonaPanel
+          personas={[]}
+          selected=""
+          setSelected={vi.fn()}
+          apiStatus="online"
+          loading={false}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain("No personas available");
+  });
+
+  it("PersonaPanel displays clear error message when api is offline", async () => {
+    await act(async () => {
+      root.render(
+        <PersonaPanel
+          personas={fallbackPersonas}
+          selected="budget-android"
+          setSelected={vi.fn()}
+          apiStatus="offline"
+          loading={false}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain("API is down or unreachable. Live test profiles could not be loaded.");
+  });
+
+  it("UploadPanel displays clear error message when api is offline", async () => {
+    await act(async () => {
+      root.render(
+        <UploadPanel
+          apk={null}
+          setApk={vi.fn()}
+          selected="budget-android"
+          setSelected={vi.fn()}
+          personas={fallbackPersonas}
+          workers={[]}
+          busy={false}
+          apiStatus="offline"
+          onSubmit={vi.fn()}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain("API is down or unreachable. Run registration is disabled.");
+  });
+
+  it("RunsTable renders runs and their statuses", async () => {
+    const mockRuns = [
+      {
+        id: "run-12345678",
+        created_at: new Date().toISOString(),
+        status: "queued",
+        apk_name: "test.apk",
+        apk_sha256: "abc1234567890def",
+        persona_id: "budget-android"
+      }
+    ];
+
+    await act(async () => {
+      root.render(
+        <BrowserRouter>
+          <RunsTable runs={mockRuns} personas={fallbackPersonas} />
+        </BrowserRouter>
+      );
+    });
+
+    expect(container.textContent).toContain("test.apk");
+    expect(container.textContent).toContain("queued for worker");
+    expect(container.textContent).toContain("Budget Android");
   });
 });

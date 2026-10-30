@@ -117,6 +117,13 @@ export default function UploadPanel({
           <span className="file-limit">APK · Max 150 MB</span>
         </label>
 
+        {apiStatus === "offline" && (
+          <div className="alert error-alert upload-inline-error" role="alert">
+            <CircleAlert size={16} />
+            <span>API is down or unreachable. Run registration is disabled.</span>
+          </div>
+        )}
+
         {fileError && (
           <div className="alert error-alert upload-inline-error" role="alert">
             <CircleAlert size={16} />
@@ -131,12 +138,17 @@ export default function UploadPanel({
           id="persona-select"
           value={selected}
           onChange={(e) => setSelected(e.target.value)}
+          disabled={personas.length === 0 || apiStatus === "offline"}
         >
-          {personas.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name + " — " + p.device}
-            </option>
-          ))}
+          {personas.length === 0 ? (
+            <option value="">No personas available</option>
+          ) : (
+            personas.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name + " — " + p.device}
+              </option>
+            ))
+          )}
         </select>
 
         <div className="run-warning">

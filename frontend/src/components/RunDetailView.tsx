@@ -17,6 +17,7 @@ import {
   api,
   displayRunStatus,
   date,
+  isRunActive,
   type RunDetail,
   type Persona,
   type WorkerReport,
@@ -79,16 +80,11 @@ export default function RunDetailView({ personas }: RunDetailViewProps) {
 
   // Auto-refresh while the worker is missing, queued, or actively running.
   useEffect(() => {
-    if (!run) return;
-    const isPending =
-      run.status === "awaiting_worker" ||
-      run.status === "queued" ||
-      run.status === "leased";
-    if (!isPending) return;
+    if (!run || !isRunActive(run.status)) return;
 
     const interval = window.setInterval(() => {
       void fetchRun(false);
-    }, 5000);
+    }, 3000);
 
     return () => window.clearInterval(interval);
   }, [run?.status, fetchRun]);
@@ -203,8 +199,9 @@ export default function RunDetailView({ personas }: RunDetailViewProps) {
           className="icon-button"
           onClick={() => void fetchRun(true)}
           aria-label="Refresh run evidence"
+          disabled={loading}
         >
-          <RefreshCw size={15} />
+          <RefreshCw size={15} className={loading ? "spin" : ""} />
         </button>
       </div>
 
@@ -243,6 +240,12 @@ export default function RunDetailView({ personas }: RunDetailViewProps) {
       </div>
 
       {/* Inline alerts for run error or cleanup warnings */}
+      {error && (
+        <div className="alert error-alert" role="alert">
+          <CircleAlert size={17} />
+          <span>{error}</span>
+        </div>
+      )}
       {run.error && (
         <div className="alert error-alert" role="alert">
           <CircleAlert size={17} />
@@ -271,9 +274,9 @@ export default function RunDetailView({ personas }: RunDetailViewProps) {
           <b>No worker report has been submitted</b>
           <p>
             {run.status === "queued"
-              ? "This test run is currently queued. Auto-refreshing every 5 seconds until a worker claims it."
-              : run.status === "leased"
-              ? "An authenticated Android worker is actively running this test. Auto-refreshing every 5 seconds."
+              ? "This test run is currently queued. Auto-refreshing until a worker claims it."
+              : run.status === "leased" || run.status === "running"
+              ? "An authenticated Android worker is actively running this test. Auto-refreshing until finished."
               : "Execution waits until an authenticated, isolated Android worker executes the test."}
           </p>
         </div>
